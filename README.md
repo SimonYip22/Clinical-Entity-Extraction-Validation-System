@@ -3678,8 +3678,227 @@ The generated dataset can be used for auditing and error analysis, or the valida
 
 ---
 
-# 12. Cloud Deployment
+# 14. Deployment
 
+## 14.1 Deployment Overview
+
+The final inference pipeline was deployed as a cloud-hosted API service to demonstrate that the system can move beyond local experimentation into a production-style serving environment.
+
+Deployment does not modify the model, extraction rules, threshold, or output schema. It packages the evaluated inference pipeline into a reproducible API runtime.
+
+**Live API:** `https://clinical-nlp-api-1064509144938.europe-west1.run.app`
+
+The deployed system provides:
+
+- Real-time clinical note inference via HTTP
+- A stateless request-response serving architecture
+- Containerised execution for reproducibility
+- Cloud Run hosting for managed serverless execution
+- CI/CD automation for repeatable deployment updates
+
+The API serves the same end-to-end pipeline described above, allowing external users to submit clinical text and receive structured entity-level outputs with validation scores.
+
+##
+## 14.2 API Serving Layer
+
+The API layer exposes the clinical NLP pipeline through FastAPI. It acts as a lightweight serving interface around the existing `run_pipeline()` function rather than introducing new extraction or validation logic.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/health` | `GET` | Confirms that the deployed service is running |
+| `/predict` | `POST` | Accepts clinical text and returns extracted, validated entities |
+
+At runtime, the model and tokenizer are loaded once when the application starts. This avoids repeated model initialisation on every request and reduces inference overhead.
+
+The request flow is:
+
+```text
+Client request
+        │
+FastAPI request validation
+        │
+Pipeline input construction
+        │
+run_pipeline()
+        │
+Rule-based extraction + BioClinicalBERT validation
+        │
+Structured JSON response
+```
+
+The API remains stateless: it does not store submitted text, persist predictions, retrain the model, or modify pipeline state between requests. Each request is processed independently, which makes the service compatible with Cloud Run scaling.
+
+##
+## 14.3 Runtime Architecture
+
+The system operates as a stateless request-response inference service. Incoming client requests are processed through a layered API stack and passed to the core NLP pipeline.
+
+```text
+Client request (browser or curl HTTP request)
+        │
+Google Cloud Run (container execution)
+        │
+Docker container
+        │
+Uvicorn (ASGI server)
+        │
+FastAPI application 
+(API routing, request handling, and pydantic validation)
+        │
+/predict endpoint
+        │ 
+End-to-end NLP pipeline (pipeline.py → run_pipeline())
+        │
+        ├── Rule-based extraction
+        ├── BioClinicalBERT validation
+        │
+        ▼
+Structured JSON response ⸺▶ Output returned to client
+```
+
+Each layer has a separate responsibility:
+
+| Layer | Responsibility |
+|------|----------------|
+| Cloud Run | Infrastructure; hosts and scales the containerised service |
+| Docker | Provides a reproducible runtime environment |
+| Uvicorn | Runs the ASGI application server |
+| FastAPI | Handles routing, request validation, and response formatting |
+| Core pipeline | Performs extraction and transformer validation |
+
+This separation keeps deployment logic distinct from model and pipeline logic. The deployed API calls the same inference pipeline used for local and batch inference, avoiding duplicated serving-specific ML logic.
+
+##
+
+## 14.4 Containerisation and Cloud Deployment
+
+The API is containerised using Docker and deployed to Google Cloud Run.
+
+The container packages:
+
+- FastAPI application code
+- Rule-based extraction modules
+- Trained BioClinicalBERT validation model
+- Tokenizer files
+- Python runtime dependencies
+- Required NLP resources
+
+This ensures the same runtime can be used locally, in containerised testing, and in cloud deployment.
+
+Deployment uses a serverless container model:
+
+```text
+   Docker image
+        │
+Google Cloud Build
+        │
+Container Registry
+        │
+Cloud Run service
+        │
+        ▼
+ Public HTTPS API
+```
+
+Cloud Run was selected because it supports:
+
+- Container-native deployment
+- Public HTTPS serving
+- Stateless request handling
+- Automatic scaling
+- Scale-to-zero behaviour when idle
+- Minimal infrastructure management
+
+The deployed service exposes the clinical NLP pipeline through the API endpoints described above and in the API usage section.
+
+##
+## 14.5 CI/CD Automation
+
+Deployment is automated using GitHub Actions. The workflow is triggered by changes pushed to the `main` branch and rebuilds/redeploys the service through Google Cloud.
+
+```text
+GitHub repository (code + LFS model storage)
+        │
+        ├── push to main
+        │
+GitHub Actions (CI/CD)
+        │
+Checkout repository + pull LFS model files
+        │
+Authenticate with Google Cloud
+        │
+Cloud Build (build Docker image)
+        │
+        ├── Push image
+        │
+Container Registry (gcr.io)
+        │
+Cloud Run deployment
+        │
+        ▼
+New revision ⸺▶ traffic routed ⸺▶ Live API updated
+```
+
+The CI/CD workflow provides:
+
+| Outcome | Meaning |
+|--------|---------|
+| Reproducibility | The service is rebuilt from version-controlled source code |
+| Reliability | Deployment steps are automated rather than manually repeated |
+| Traceability | Cloud Run revisions are tied to repository state |
+| Scalability | Future updates can reuse the same deployment process |
+| Security | Cloud credentials are stored as GitHub Secrets, not in the repository |
+
+The workflow handles source checkout, Git LFS model retrieval, Google Cloud authentication, Docker image build, image registry upload, and Cloud Run deployment.
+
+No credentials are stored in the codebase. Google Cloud authentication is handled through encrypted GitHub repository secrets.
+
+##
+## 14.6 Deployment Components
+
+| Component | Purpose |
+|-----------|---------|
+| GitHub | Source code and model storage via Git LFS |
+| GitHub Actions | CI/CD automation |
+| Google Cloud Build | Docker image build process |
+| Container Registry | Stores built container images |
+| Google Cloud Run | Hosts the deployed serverless API |
+| FastAPI | Provides the HTTP inference interface |
+| Docker | Defines the reproducible runtime environment |
+
+Together, these components form a complete deployment pipeline where source changes can be converted into a new live API revision through an automated build-and-deploy workflow.
+
+##
+## 14.7 Deployment Artefacts
+
+The deployment layer is defined by the following files:
+
+```text
+app/
+  main.py                    # FastAPI application
+
+src/
+  pipeline/                  # Core inference pipeline
+  extraction/                # Rule-based extraction logic
+  validation/                # Transformer validation logic
+
+models/
+  bioclinicalbert_final/     # Saved model and tokenizer files
+
+Dockerfile                   # Container definition
+requirements-api.txt         # API/runtime dependencies
+.dockerignore                # Docker build context exclusions
+.gcloudignore                # Cloud Build exclusions
+
+.github/workflows/
+  deploy.yaml                # CI/CD deployment workflow
+
+.gitattributes               # Git LFS model tracking
+```
+
+Together, these artefacts define how the system is built, packaged, served, and redeployed.
+
+The final deployment demonstrates that the project is not only a local modelling pipeline, but a deployable clinical NLP inference service with reproducible containerisation, automated cloud deployment, and a public HTTP interface.
 
 ---
 
