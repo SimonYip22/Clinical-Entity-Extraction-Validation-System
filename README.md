@@ -2211,80 +2211,1534 @@ Final outputs:
 
 
 ##
-## 10.8 Final Model Training and Saved Artefacts
+## 10.8 Final Model Training and Artefact Saving
 
+### Final Training Objective
 
+After cross-validation, model selection, and threshold optimisation, the final BioClinicalBERT validation model was trained on the full training set of **1,020 annotated candidate entities** using the selected advanced configuration.
 
+This stage produces the definitive transformer validation model used for held-out test-set evaluation, downstream pipeline inference, and deployment-style prediction.
 
-## 10.9 Final Validation Output
+No further hyperparameter tuning, validation-set selection, or threshold optimisation is performed during this stage. Cross-validation is used for model selection; final training fits one model on the full available training set.
 
-After thresholding, the validation layer writes model-derived outputs into the nested `validation` field for each candidate entity.
-
-Output:
-
-```json
-{
-  "is_valid": true,
-  "confidence": 0.567,
-  "task": "symptom_presence"
-}
+```text
+          1,020 annotated training examples
+                        │
+       Structured input construction + tokenisation
+                        │
+          BioClinicalBERT sequence classifier
+                        │
+          Final trained validation model
+                        │
+                        ▼
+     Saved model weights + tokenizer + config files
 ```
 
-| Field | Meaning |
-|------|---------|
-| `validation.is_valid` | Final binary validity decision after thresholding |
-| `validation.confidence` | Model probability for the valid class |
-| `validation.task` | Entity-specific validation task |
+The trained model is paired with the previously selected threshold of `0.549` during inference and evaluation.
 
-The validated output preserves the original rule-based provenance fields while adding contextual model judgement. This allows downstream users to inspect both the extracted span and the model’s confidence in its clinical validity.
+| Component | Role |
+|-----------|------|
+| Final model training | Learns contextual validity scoring |
+| Threshold policy | Converts probability scores into precision-oriented binary decisions |
 
-- `is_valid` is the primary decision variable
-- `confidence` supports thresholding, ranking, and error analysis
-- `task` ensures interpretation is aligned with entity semantics
+The threshold is external to the model weights. The model outputs probabilities; the threshold defines the final acceptance rule.
 
+##
+### Model Architecture
+
+The final validation model uses BioClinicalBERT as a binary sequence classifier.
+
+```python
+AutoModelForSequenceClassification.from_pretrained(
+    "emilyalsentzer/Bio_ClinicalBERT",
+    num_labels=2
+)
+```
+
+The model learns the function:
+
+```text
+f(section + entity + task + sentence context) → valid / invalid
+```
+
+| Component | Role |
+|-----------|------|
+| BioClinicalBERT encoder | Produces contextual token representations from the structured input |
+| [CLS] token representation | Sequence-level embedding used for classification |
+| Classification head | Maps the [CLS] representation to binary validity logits |
+| Softmax layer | Converts logits into probability scores for the valid class |
+
+The classification head is task-specific and trained during fine-tuning. The pretrained encoder is also updated, allowing BioClinicalBERT to adapt its clinical language representations to the entity-validation task.
+
+Forward pass:
+
+1. Tokenised input sequence is passed into the BioClinicalBERT encoder  
+2. Contextual embeddings are computed across all tokens  
+3. The final `[CLS]` representation is used as the sequence-level embedding.
+4. A linear classification head maps this embedding to two logits  
+5. Softmax converts logits → probabilities `p(y = 0), p(y = 1)`  
+
+##
+### Validation Model Architecture
+
+```text
+                  ┌────────────────────────────────────────────┐
+                  │         Structured Candidate Inputs        │
+                  ├────────────────────────────────────────────┤
+                  │ SECTION      → document context            │
+                  │ ENTITY TYPE  → entity class                │
+                  │ ENTITY       → extracted candidate span    │
+                  │ CONCEPT      → normalised clinical concept │
+                  │ TASK         → validation objective        │
+                  │ TEXT         → full sentence-level context │
+                  └────────────────────────────────────────────┘
+                                        │
+                                        ▼
+          ┌──────────────────────────────────────────────────────────────┐
+          │                   Input Serialisation                        │
+          │ [SECTION] ... [ENTITY TYPE] ... [ENTITY] ... [TEXT] ...      │
+          │ [CONCEPT] ... [TASK] ...                                     │       
+          └──────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+          ┌──────────────────────────────────────────────────────────────┐
+          │                  Tokenisation Layer                          │
+          │ Bio_ClinicalBERT Tokenizer                                   │
+          │ → input_ids (vocab_size = 28,996)                            │
+          │ → attention_mask                                             │
+          │ → token_type_ids (type_vocab_size = 2)                       │
+          │ → max_length = 512                                           │
+          └──────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+          ┌──────────────────────────────────────────────────────────────┐
+          │                 Embedding Layer                              │
+          │ Token + Positional + Segment Embeddings                      │
+          │ hidden_size = 768                                            │
+          └──────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+          ┌──────────────────────────────────────────────────────────────┐
+          │              Transformer Encoder (12 Layers)                 │
+          │                                                              │
+          │ Each layer contains:                                         │
+          │   • Multi-head self-attention (12 heads, dim=64 each)        │
+          │   • Feed-forward network (768 → 3072 → 768)                  │
+          │   • GELU activation                                          │
+          │   • Dropout (0.1)                                            │
+          │   • Residual connections + LayerNorm                         │
+          │                                                              │
+          │ Output: contextualised token representations                 │
+          └──────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+          ┌──────────────────────────────────────────────────────────────┐
+          │     [CLS] Sequence Representation (final hidden state)       │
+          │ 768-dimensional contextual embedding                         │
+          └──────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+          ┌──────────────────────────────────────────────────────────────┐
+          │                Classification Head                           │
+          │ Linear layer: 768 → 2 logits                                 │   
+          │ Labels: invalid / valid                                      │
+          │ (task-specific, randomly initialised, trained during         │
+          │  fine-tuning)                                                │
+          └──────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+          ┌──────────────────────────────────────────────────────────────┐
+          │                 Probability Output                           │
+          │ Softmax → p(valid), p(invalid)                               │
+          └──────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+          ┌──────────────────────────────────────────────────────────────┐
+          │           External Threshold Decision Policy                 │
+          │ Precision-maximisation under recall constraint               │
+          │ (recall ≥ 0.85 × baseline) = Accept if p(valid) ≥ 0.549      │
+          └──────────────────────────────────────────────────────────────┘
+```
+
+##
+### Input Representation
+
+Each candidate entity is converted into a structured text sequence before tokenisation:
+
+```text
+[SECTION] {section}
+[ENTITY TYPE] {entity_type}
+[ENTITY] {entity_text}
+[CONCEPT] {concept}
+[TASK] {task}
+[TEXT] {sentence_text}
+```
+
+This representation gives the model explicit access to the candidate entity, its normalised concept, the validation task, and the local clinical context:
+
+| Field | Purpose |
+|-------|---------|
+| `section` | Provides document-level context for interpreting short or ambiguous sentences |
+| `entity_type` | Indicates the class of entity being validated (e.g., `SYMPTOM`, `INTERVENTION`, `CLINICAL_CONDITION`) |
+| `entity_text` | The extracted text span for the candidate entity |
+| `concept` | Provides the normalised clinical concept associated with the span, providing additional semantic information |
+| `task` | Defines what validity means for the candidate (e.g., `symptom_presence`, `intervention_performed`, `clinical_condition_active`) |
+| `sentence_text` | Provides the sentence-level context used for classification |
+
+This encodes structured metadata explicitly into a single sequence and avoids separate feature engineering by leveraging contextual embeddings. Fields derived from labels or model outputs, including `is_valid`, `confidence`, and `negated`, are excluded from the model input to avoid leakage.
+
+##
+### Tokenisation and Dataset Transformation
+
+Inputs are tokenised using the BioClinicalBERT tokenizer:
+
+```python
+AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
+```
+
+Tokenisation of each sequence produces:
+
+| Output | Purpose |
+|--------|---------|
+| `input_ids` | Numerical token IDs mapped to the BioClinicalBERT vocabulary |
+| `attention_mask` | Identifies real tokens vs padding tokens | 
+| `token_type_ids` | Segment embeddings, default to 0 as inputs are represented as a single sequence |
+
+Tokenisation settings:
+
+| Setting | Value |
+|---------|-------|
+| `max_length` | 512 tokens |
+| Padding | Fixed-length padding |
+| Truncation | Truncate inputs longer than 512 tokens |
+| Tensor format | PyTorch tensors for model input |
+
+Dataset preparation follows this sequence:
+
+```text
+           train.csv
+               │
+        Load into pandas
+               │
+  Convert is_valid → label 0/1
+               │
+ Convert to Hugging Face Dataset
+               │
+Serialise structured input fields
+               │
+     Tokenise input sequence
+               │
+     Remove raw text columns
+               │
+               ▼
+    Set PyTorch tensor format
+```
+
+The final training dataset contains only the numerical tensors required by the model:
+
+```text
+input_ids        → token indices
+attention_mask   → padding mask
+label            → binary target (0/1)
+```
 
 
 ##
-## 10.10 Development Refinement
+### Final Training Configuration
+
+The final model uses the advanced configuration selected during cross-validation.
+
+| Hyperparameter              | Value   | Role | Rationale |
+|----------------------------|---------|-------|------------|
+| Learning rate              | `3e-6`  | Peak step size for weight updates      | Low learning rate required for stable fine-tuning of pretrained BERT      |
+| Batch size (per device)    | `8`     | Samples per forward/backward pass      | Constrained by GPU memory while maintaining stable gradients              |
+| Gradient accumulation      | `2`     | Accumulates gradients across steps     | Effective batch size = 16 without increasing memory usage                 |
+| Epochs                     | `5`     | Full passes over dataset               | Empirically sufficient for convergence without overfitting                |
+| Weight decay               | `0.05`  | L2 regularisation (AdamW) factor       | Reduces overfitting and improves generalisation by penalising large weights |
+| Warmup ratio               | `0.1`   | Fraction of steps used for LR warmup   | Stabilises early training dynamics in transformer fine-tuning             |
+| Max gradient norm          | `1.0`   | Gradient clipping threshold            | Prevents exploding gradients and ensures numerical stability              |
+| LR scheduler               | Linear  | Step-wise LR schedule (warmup → decay) | Ensures smooth convergence and stable optimisation trajectory             |
+
+Effective batch size:
+
+```text
+effective batch size = batch size × gradient accumulation
+                     = 8 × 2
+                     = 16
+```
+
+The learning rate follows a step-based warmup and decay schedule:
+
+- During the first 10% of optimiser steps, the learning rate increases linearly from near zero to `3e-6`.
+- During the remaining steps, it decays linearly toward zero.
+- The scheduler updates per optimiser step, not per epoch.
+
+This configuration balances stable fine-tuning, efficient data utilisation, and regularisation in a low-data clinical NLP setting.
+
+##
+### Training Procedure
+
+Training is implemented using the Hugging Face `Trainer` API, which handles batching, forward/backward passes, gradient accumulation, optimiser updates, learning-rate scheduling, and logging.
+
+Final training uses the selected advanced configuration to fit one definitive model on the full training set.
+
+| Aspect | Final Training Behaviour |
+|--------|--------------------------|
+| Training data | Full 1,020-sample training set |
+| Learning type | Supervised binary classification |
+| Validation during training | None |
+| Evaluation during training | Disabled (`eval_strategy = "no"`) |
+| Checkpoint selection | Disabled (`save_strategy = "no"`) |
+| Hyperparameter tuning | None; configuration fixed after cross-validation |
+| Reproducibility | Fixed random seeds |
+| Optimisation scope | Training data only |
+| Final output | Model saved after training completes |
+
+This is intentional. Model selection was already completed during cross-validation, and the held-out test set is reserved for final unbiased evaluation. Final training therefore focuses only on fitting the selected model configuration to the full training data.
+
+The training process follows a standard supervised fine-tuning loop:
+
+```text
+for each epoch:
+    shuffle training data
+    split into mini-batches
+
+    for each batch:
+        forward pass
+        compute cross-entropy loss
+        backward pass
+        accumulate gradients
+
+        if gradient accumulation step reached:
+            clip gradients
+            AdamW optimiser update
+            learning rate scheduler step
+            reset gradients
+```
+
+Training operates at three nested execution levels:
+
+| Level | Description |
+|-------|-------------|
+| Epoch level | Each epoch represents a full pass over the training dataset. The dataset is shuffled at the start of each epoch to ensure different batch compositions. |
+| Batch level | Each batch contains a subset of training samples (batch size = 8). The model processes each batch sequentially, performing forward and backward passes to compute gradients. |
+| Optimisation step level | Parameter updates are triggered by gradient accumulation, ensuring stable training dynamics. |
+
+
+The model is therefore trained as a deterministic supervised classifier over the final training dataset.
+
+For each epoch:
+
+1. The dataset is shuffled (deterministically via seed)
+2. The dataset is partitioned into mini-batches (`batch_size = 8`)
+3. Each batch is processed sequentially
+4. After every `gradient_accumulation_steps = 2` batches, a single optimiser update is triggered
+
+Effective behaviour:
+
+- 1 epoch = full pass over 1020 samples
+- Gradients are accumulated over 2 batches (effective batch size = 16)
+- Approximate optimiser updates per epoch:
+  1020 / 16 ≈ 63 updates
+
+For each batch:
+
+1. **Forward pass:** 
+    - Tokenised input → BERT encoder → logits (2-class output)
+2. **Loss computation:** 
+    - Cross-entropy loss against ground truth labels
+3. **Backward pass:** 
+    - Gradients computed via backpropagation
+4. **Gradient accumulation:** 
+    - Gradients are accumulated across steps instead of being applied immediately
+5. **Conditional optimisation step (checked every batch):** 
+    - If accumulation condition is met (`gradient_accumulation_steps = 2`)
+      - Gradient clipping is applied (`max_norm = 1.0`)
+      - AdamW updates model parameters (`weight_decay = 0.05`)
+      - Learning rate scheduler updates learning rate based on global step (warmup → decay)
+      - Gradients are reset (zeroed)
+
+The final result is a deterministic supervised BioClinicalBERT classifier trained to assign contextual validity scores to rule-generated candidate entities.
+
+##
+### Full Training Workflow
+
+```text
+          ┌──────────────────────────────────────────────────────────────────────────────┐
+          │                          TRAINING CONFIGURATION                              │
+          │                                                                              │
+          │  epochs               = 5                                                    │
+          │  batch_size           = 8                                                    │
+          │  grad_accum           = 2                                                    │
+          │  learning_rate        = 3e-6                                                 │
+          │  weight_decay         = 0.05                                                 │
+          │  warmup_ratio         = 0.1                                                  │
+          │  max_grad_norm        = 1.0                                                  │
+          │  lr_scheduler         = linear                                               │
+          │                                                                              │
+          │  Defines optimisation hyperparameters (static during training)               │
+          └──────────────────────────────────────────────────────────────────────────────┘
+                                                │
+                                                ▼
+          ┌──────────────────────────────────────────────────────────────────────────────┐
+          │                     TRAINING PROCESS (Hugging Face Trainer)                  │
+          │                                                                              │
+          │  Optimisation = repeated nested execution over epochs → batches → steps      │
+          └──────────────────────────────────────────────────────────────────────────────┘
+                                                │
+                                                ▼
+          ┌──────────────────────────────────────────────────────────────────────────────┐
+          │                           EPOCH LOOP (×5)                                    │
+          │                                                                              │
+          │  for epoch in range(num_epochs)                                              │
+          │                                                                              │
+          │  ┌────────────────────────────────────────────────────────────────────────┐  │
+          │  │                      SHUFFLED TRAINING DATASET                         │  │
+          │  │                (deterministic seed-controlled order)                   │  │
+          │  └────────────────────────────────────────────────────────────────────────┘  │
+          │                                     │                                        │
+          │                                     ▼                                        │
+          │  ┌────────────────────────────────────────────────────────────────────────┐  │
+          │  │                            BATCH LOOP                                  │  │
+          │  │                                                                        │  │
+          │  │        batch_size = 8 (samples per forward/backward pass)              │  │
+          │  │                                                                        │  │
+          │  │    ┌──────────────────────────────────────────────────────────────┐    │  │
+          │  │    │          FORWARD–BACKWARD STEP (batch i)                     │    │  │
+          │  │    │                                                              │    │  │
+          │  │    │  [FORWARD PASS]                                              │    │  │
+          │  │    │  Input → Token IDs → BERT Encoder → logits                   │    │  │
+          │  │    │                                                              │    │  │
+          │  │    │  [LOSS COMPUTATION]                                          │    │  │
+          │  │    │  loss = CrossEntropy(logits, label)                          │    │  │
+          │  │    │  loss scaled for gradient accumulation (internal)            │    │  │
+          │  │    │                                                              │    │  │
+          │  │    │  [BACKWARD PASS]                                             │    │  │
+          │  │    │  backward() → gradients stored in parameter buffers          │    │  │
+          │  │    │                                                              │    │  │
+          │  │    │  (no parameter update yet)                                   │    │  │
+          │  │    └──────────────────────────────────────────────────────────────┘    │  │
+          │  │                                  │                                     │  │
+          │  │    ┌──────────────────────────────────────────────────────────────┐    │  │
+          │  │    │              FORWARD–BACKWARD STEP (batch i+1)               │    │  │
+          │  │    │                                                              │    │  │
+          │  │    │  [FORWARD PASS]                                              │    │  │
+          │  │    │  Input → Token IDs → BERT Encoder → logits                   │    │  │
+          │  │    │                                                              │    │  │
+          │  │    │  [LOSS COMPUTATION]                                          │    │  │
+          │  │    │  loss = CrossEntropy(logits, label)                          │    │  │
+          │  │    │  loss scaled for gradient accumulation (internal)            │    │  │
+          │  │    │                                                              │    │  │
+          │  │    │  [BACKWARD PASS]                                             │    │  │
+          │  │    │  backward() → gradients accumulated (summed)                 │    │  │
+          │  │    │                                                              │    │  │
+          │  │    │  (accumulation step reached → ready for update)              │    │  │
+          │  │    └──────────────────────────────────────────────────────────────┘    │  │
+          │  │                                  │                                     │  │
+          │  │                                  ▼                                     │  │
+          │  │       ┌────────────────────────────────────────────────────────┐       │  │
+          │  │       │          ACCUMULATION STATE (grad_accum = 2)           │       │  │
+          │  │       │                                                        │       │  │
+          │  │       │  effective batch size = 16                             │       │  │
+          │  │       │  gradients represent sum over 2 batches                │       │  │
+          │  │       └────────────────────────────────────────────────────────┘       │  │
+          │  │                                  │                                     │  │
+          │  │                                  ▼                                     │  │
+          │  │       ┌────────────────────────────────────────────────────────┐       │  │
+          │  │       │            OPTIMISER UPDATE STEP                       │       │  │
+          │  │       │                                                        │       │  │
+          │  │       │  1. Gradient clipping (max_norm = 1.0)                 │       │  │
+          │  │       │  2. AdamW parameter update (weight_decay = 0.05)       │       │  │
+          │  │       │  3. LR scheduler step (global step-based)              │       │  │
+          │  │       │                                                        │       │  │
+          │  │       │     warmup (10%) → linear LR increase to 3e-6          │       │  │
+          │  │       │     decay → linear LR decrease to ~0                   │       │  │
+          │  │       │                                                        │       │  │
+          │  │       │  Model parameters updated in-place                     │       │  │
+          │  │       └────────────────────────────────────────────────────────┘       │  │
+          │  │                                  │                                     │  │
+          │  │                                  ▼                                     │  │
+          │  │       ┌────────────────────────────────────────────────────────┐       │  │
+          │  │       │         GRADIENT RESET (zero_grad)                     │       │  │
+          │  │       │                                                        │       │  │
+          │  │       │  Gradient buffers cleared for next accumulation cycle  │       │  │
+          │  │       └────────────────────────────────────────────────────────┘       │  │
+          │  │                                                                        │  │
+          │  └────────────────────────────────────────────────────────────────────────┘  │
+          │                                                                              │
+          └──────────────────────────────────────────────────────────────────────────────┘
+```
+
+##
+### Saved Model Artefacts
+
+The final trained model is saved to `models/bioclinicalbert_final/` containing all trained transformer validation component of the pipeline for reproducible inference. It is used in the downstream evaluation and inference stages to assign contextual validity scores to rule-generated candidate entities.
+
+Model files:
+
+- `model.safetensors` → Trained model weights (secure and memory-efficient format)
+- `config.json` → Model architecture configuration (e.g., hidden size, number of layers, label mapping)
+
+Tokenizer files:
+
+- `vocab.txt` → Token vocabulary used for mapping tokens → IDs
+- `tokenizer.json` → Full tokenizer specification (tokenisation rules, merges, normalisation)
+- `tokenizer_config.json` → Tokenizer settings (e.g., max length, padding/truncation behaviour)
+- `special_tokens_map.json` → Definitions of special tokens (e.g., `[CLS]`, `[SEP]`, `[PAD]`)
+
+Training metadata:
+
+- `training_args.bin` → Serialized training configuration from the `Trainer` API (hyperparameters, scheduling, etc.)
+
+These artefacts define a self-contained model package that can be loaded for evaluation, inference, or deployment:
+
+```python
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+model = AutoModelForSequenceClassification.from_pretrained(
+    "models/bioclinicalbert_final"
+)
+
+tokenizer = AutoTokenizer.from_pretrained(
+    "models/bioclinicalbert_final"
+)
+```
+
+##
+### Implementation Summary
+
+Final model training is implemented in `train_final_model.py`.
+
+The workflow is:
+
+1. Set deterministic random seeds across Python, NumPy, and PyTorch
+2. Load the 1,020-sample training dataset
+3. Convert `is_valid` labels into binary targets
+4. Load the BioClinicalBERT tokenizer
+5. Serialise structured fields into the final model input format
+6. Tokenise all examples with fixed padding and truncation
+7. Convert the dataset into PyTorch tensor format
+8. Initialise BioClinicalBERT with a binary classification head
+9. Train using the selected advanced configuration
+10. Save the final model, tokenizer, configuration, and training metadata
+
+At this stage, the validation layer consists of a saved BioClinicalBERT classifier, tokenizer, training configuration, and calibrated decision threshold. These artefacts are used in the downstream evaluation and inference stages to assign contextual validity scores to rule-generated candidate entities.
+
+##
+## 10.9 Development Refinement 
 
 Initial model development used a smaller 600-entity annotation set with a conventional train/validation/test split. This was sufficient to validate the data pipeline, tokenisation, model training loop, and metric computation.
 
-Several training iterations were used to test input formatting, learning-rate stability, regularisation, partial freezing, and cross-validation. These experiments showed that the pipeline was functional and that BioClinicalBERT could learn the validation task, but performance remained sensitive to data splits and did not improve reliably with additional hyperparameter complexity.
+Several training iterations tested input formatting, learning-rate stability, regularisation, partial freezing, and cross-validation. These experiments showed that the pipeline was functional and that BioClinicalBERT could learn the validation task, but performance remained sensitive to data splits and did not improve reliably with additional hyperparameter complexity.
 
-This suggested that the main limitation was labelled data volume rather than model architecture alone. The validation task also proved more ambiguous than expected, particularly for `INTERVENTION` and `CLINICAL_CONDITION`, where labels depend on temporality, intent, uncertainty, and active/current status. The smaller dataset did not provide enough examples of these contextual patterns for stable decision boundaries.
+This suggested that labelled data volume, rather than model architecture alone, was the main bottleneck. The validation task was also more ambiguous than expected, particularly for `INTERVENTION` and `CLINICAL_CONDITION`, where labels depend on temporality, intent, uncertainty, and active/current status.
 
-The annotation dataset was therefore expanded from 600 to 1,200 candidates using the same balanced sampling protocol. The final workflow was revised to use an 85/15 train/test split with 5-fold cross-validation on the training set.
+The annotation dataset was therefore expanded from 600 to 1,200 candidates using the same balanced sampling protocol. The final workflow used an 85/15 train/test split with 5-fold cross-validation on the training set.
 
-The final README-reported methodology reflects this expanded dataset and cross-validated training strategy.
+---
 
+# 11. Evaluation
+
+## 11.1 Evaluation Objective
+
+Evaluation was performed on a fully held-out test set of **180 manually annotated candidate entities**. The objective was to assess whether the transformer validation layer improves the quality of rule-generated clinical entity candidates.
+
+The purpose is not generic model benchmarking. The evaluation is designed to test whether the final pipeline achieves its intended behaviour:
+
+> High-recall rule-based extraction → precision-oriented transformer validation
+
+Evaluation therefore focuses on:
+
+- Whether precision improves over the rule-based baseline
+- How much recall is lost as a result of transformer filtering
+- Whether the precision–recall trade-off is acceptable for downstream structured dataset generation
+- Whether performance differs across entity types
+
+The key evaluation question is:
+
+> Does BioClinicalBERT validation reduce false positives enough to justify the loss of recall?
+
+##
+## 11.2 Evaluation Design
+
+Evaluation is performed at pipeline level, not as an isolated transformer model assessment.
+
+Three aligned components are compared:
+
+| Component | Role |
+|----------|------|
+| Ground truth | Manually annotated `is_valid` labels from the held-out test set |
+| Rule-based baseline | Deterministic extraction output before transformer validation |
+| Transformer output | Final BioClinicalBERT validation output after thresholding |
+
+Both systems are evaluated independently against the same ground truth:
+
+```text
+                 Ground Truth
+                   y_true
+                     ▲
+        ┌────────────┴────────────┐
+        │                         │
+        │                         │
+  Rule-Based Baseline      Transformer Validation
+      rule_pred                 model_pred
+```
+
+There is no direct pairwise evaluation between the rule-based system and transformer system. Improvement is inferred by comparing each system against the same manually annotated reference labels.
+
+This design ensures:
+
+- A single unbiased reference standard
+- Direct comparability between baseline and final pipeline output
+- Valid interpretation of precision, recall, and false-positive reduction
+- Clear attribution of improvement to the transformer validation layer
+
+##
+## 11.3 Two-Layer Evaluation Structure
+
+Evaluation is organised into two layers: a primary global evaluation and a secondary diagnostic analysis.
+
+### Layer 1: Core System Evaluation
+
+The first layer assesses global system behaviour across the full held-out test set.
+
+| System | Prediction |
+|-------|------------|
+| Rule-based baseline | `rule_pred` (binary) |
+| Transformer validation | `model_pred` (binary after thresholding) |
+
+Both are evaluated against `y_true` which is the manually annotated ground-truth label.
+
+This layer reports overall `accuracy`, `precision`, `recall`, `f1_score`, and confusion matrix components (`TP`, `FP`, `TN`, `FN`) for both systems to establish whether the transformer validation stage achieves the intended global effect:
+
+```text
+Precision change
+Recall change
+False-positive reduction
+Overall F1 trade-off
+```
+
+##
+### Layer 2: Stratified and Diagnostic Analysis
+
+The second layer explains where and why performance changes occur by including additional analyses:
+
+- Entity-type stratified performance
+- Probability distribution analysis using `model_prob`
+- Precision–recall behaviour across thresholds
+- Interpretation of false positives and false negatives
+
+This layer is explanatory. It does not redefine overall performance; it explains the global results from Layer 1.
+
+Expected behaviour differs by entity type:
+
+| Entity Type | Expected Transformer Effect |
+|-------------|----------------------------|
+| `SYMPTOM` | Smaller gains because rule-based extraction already includes negation handling |
+| `INTERVENTION` | Moderate gains due to planned/performed ambiguity |
+| `CLINICAL_CONDITION` | Larger or more variable gains due to historical/resolved/uncertain condition mentions |
+
+This two-layer structure prevents over-interpreting local patterns before confirming global system behaviour.
+
+##
+## 11.4 Evaluation Prediction Dataset
+
+### Prediction Table
+
+Evaluation is based on a single aligned prediction table. Each row corresponds to one candidate entity from the held-out test set.
+
+The dataset contains ground truth labels, rule-based predictions, transformer probabilities, and final thresholded transformer predictions.
+
+| Column | Description |
+|--------|-------------|
+| `entity_type` | Entity category used for stratified analysis |
+| `y_true` | Ground-truth label from manual annotation |
+| `rule_pred` | Rule-based baseline prediction |
+| `model_prob` | BioClinicalBERT probability for the positive class (p(y=1)) |
+| `model_pred` | Transformer prediction after applying the tuned threshold |
+
+This single-table design ensures that all evaluation metrics are computed from the same aligned reference dataset.
+
+##
+### Ground Truth
+
+The ground truth is the manually annotated is_valid label from the held-out test set:
+
+```text
+is_valid → y_true ∈ {0, 1}
+```
+
+This is the reference label used to evaluate both the rule-based baseline and the transformer-validated output.
+
+##
+### Rule-Based Baseline Prediction
+
+The rule-based baseline represents the extraction system before transformer validation.
+
+The baseline prediction logic is:
+
+| Entity Type | Rule-Based Prediction Logic |
+|-------------|-----------------------------|
+| `SYMPTOM`    | `negated = True` → invalid (`0`); `negated = False` → valid (`1`) |
+| `INTERVENTION` | All extracted candidates treated as valid |
+| `CLINICAL_CONDITION` | All extracted candidates treated as valid |
+
+This reflects the design of the extraction layer. The rule-based system prioritises candidate coverage and only applies lightweight validity logic where it is semantically reliable: symptom negation.
+
+##
+### Transformer Prediction
+
+The transformer validation model outputs a logits → coverted to probability for the valid class:
+
+```text
+model_prob = p(is_valid = 1)
+```
+
+The calibrated threshold selected during threshold tuning is then applied:
+
+```text
+model_pred = 1 if model_prob ≥ 0.549 else 0
+```
+
+These predictions represent the final validation output of the pipeline.
+
+##
+### 11.5 Metric Selection and Rationale
+
+Evaluation uses four core metrics.
+
+| Metric    | Definition | What it Captures | Relevance to Pipeline |
+|-----------|------------|------------------|----------------------|
+| **Precision** | `TP / (TP + FP)` | Proportion of retained entities (predicted positives) that are correct | Primary objective: measures false-positive reduction |
+| **Recall** | `TP / (TP + FN)` | Proportion of valid entities (true positives) retained | Measures the cost of transformer filtering; captures loss of coverage due to filtering |
+| **F1 Score** | Harmonic mean of precision and recall | Balance between correctness and coverage | Primary indicator of overall system improvement; indicates whether the precision–recall trade-off improves overall behaviour |
+| **Accuracy** | `(TP + TN) / Total` | Overall correctness | Included for completeness, but less informative in this setting (secondary) |
+
+Metric interpretation is tied directly to the pipeline objective.
+
+The rule-based system is expected to have:
+
+```text
+High recall
+Lower precision
+More false positives
+```
+
+The transformer-validated system is expected to have:
+
+```text
+Higher precision
+Lower recall
+Fewer false positives
+```
+
+Therefore:
+
+| Metric Change | Interpretation |
+|---------------|----------------|
+| Precision increase | Transformer successfully removes false positives |
+| Recall decrease | Transformer filtering removes some valid entities |
+| F1 increase | Precision gain outweighs recall loss |
+| F1 decrease | Recall loss outweighs precision gain |
+| Accuracy increase | More overall correct decisions, usually driven by improved true-negative detection |
+
+Accuracy is included but is not the primary success criterion. In this task, a model can improve accuracy by rejecting many invalid candidates (TN), while still losing important valid entities (FN). Precision and recall therefore provide the more relevant assessment of pipeline behaviour as they directly measure incorrect inclusions (FP) and missed valid entities (FN).
+
+##
+## 11.6 Confusion Matrix Rationale
+
+Confusion matrix decomposition is included because scalar metrics alone do not show how system errors change.
+
+For each system, predictions are compared against ground truth using:
+
+| Component | Meaning |
+|-----------|---------|
+| True Positive (TP) | Valid entity correctly retained |
+| False Positive (FP) | Invalid entity incorrectly retained |
+| True Negative (TN) | Invalid entity correctly rejected |
+| False Negative (FN) | Valid entity incorrectly rejected |
+
+This is important because the central evaluation question is not simply whether the transformer improves a score, but how it changes the error profile.
+
+The confusion matrix allows direct assessment of:
+
+| Error Change | Meaning |
+|-------------|---------|
+| FP ↓ | Transformer improves precision by removing incorrect entities |
+| FN ↑ | Transformer loses recall by rejecting valid entities |
+| TP retention | Measures how much useful signal is preserved |
+| TN ↑ | Measures improvement in rejecting invalid candidates |
+
+This makes the precision–recall trade-off explicit and interpretable.
+
+##
+## 11.7 Evaluation Implementation
+
+The evaluation prediction dataset is generated by `run_evaluation.py`.
+
+At a high level, the script:
+
+1. Loads the held-out test set.
+2. Converts manual `is_valid` labels into `y_true`.
+3. Computes rule-based baseline predictions using entity-specific rule logic.
+4. Loads the final BioClinicalBERT model and tokenizer.
+5. Reconstructs the same structured input format used during training.
+6. Runs batched transformer inference.
+7. Converts logits into `model_prob`.
+8. Applies the tuned threshold `0.549` to generate `model_pred`.
+9. Saves the aligned prediction dataset to `outputs/evaluation/pipeline_predictions.csv`.
+
+This file is the single source for all downstream evaluation metrics, confusion matrices, stratified analysis, and probability diagnostics.
+
+##
+## 11.8 Core System Evaluation
+
+### Summary of Results
+
+Core evaluation compares the rule-based baseline and the transformer-validated output against the same manually annotated held-out test set.
+
+| System | Accuracy | Precision | Recall | F1 Score |
+|--------|---------:|----------:|-------:|---------:|
+| Rule-Based Baseline | 0.628 | 0.571 | **0.989** | **0.724** |
+| Transformer Validation | **0.750** | **0.833** | 0.618 | 0.710 |
+
+The transformer substantially improves precision and accuracy, but recall decreases. F1 score decreases slightly because the recall loss outweighs the precision gain at the selected threshold.
+
+![Core Metrics Comparison](outputs/evaluation/core_plots/metrics_comparison.png)
+
+##
+### Rule-Based Baseline Interpretation
+
+The rule-based baseline behaves as a high-recall candidate generator.
+
+| Metric | Value | Interpretation |
+|--------|------:|----------------|
+| Precision | 0.571 | Low precision reflects many false positives retained by the rule-based layer |
+| Recall | 0.989 | Near-perfect recall confirms that the extraction layer captures almost all valid entities |
+| F1 Score | 0.724 | Moderately high due to extremely strong recall |
+| Accuracy | 0.628 | Limited by the high number of false positives |
+
+This is consistent with the intended role of the rule-based stage:
+
+- It maximises candidate coverage.
+- It preserves almost all valid entities.
+- It accepts a high false-positive burden.
+- It is suitable as a candidate generation stage, but not as a final validated output layer.
+
+The rule-based system therefore performs as expected: broad coverage with limited contextual discrimination.
+
+##
+### Transformer Validation Interpretation
+
+The transformer-validated system behaves as a precision-oriented filtering layer.
+
+| Metric | Value | Interpretation |
+|--------|------:|----------------|
+| Precision | 0.833 | Large improvement in correctness of retained entities |
+| Recall | 0.618 | Substantial loss of valid entities due to stricter filtering |
+| F1 Score | 0.710 | Slightly lower than baseline because recall loss outweighs precision gain |
+| Accuracy | 0.750 | Improved overall correctness, mainly from rejecting invalid candidates |
+
+The transformer substantially reduces false positives, indicating that it successfully learns contextual validity patterns not captured by the rule-based layer.
+
+However, this comes at a meaningful recall cost. The model removes a substantial number of valid entities alongside invalid ones, which indicates that the selected threshold is conservative on the held-out test set.
+
+The transformer therefore improves reliability of retained outputs but reduces coverage.
+
+##
+### Comparative Metric Changes
+
+| Metric | Δ Transformer − Rule | Relative Change | Interpretation |
+|--------|---------------------:|----------------:|----------------|
+| Accuracy | +0.122 | **+19.5%** | Improved overall correctness, mainly from increased true negatives |
+| Precision | +0.262 | **+45.9%** | Major reduction in false positives; primary objective achieved |
+| Recall | −0.371 | −37.5% | Substantial loss of coverage due to filtering |
+| F1 Score | −0.015 | −2.0% | Slight decrease because recall loss exceeds precision gain |
+
+The main evaluation finding is clear:
+
+> Transformer validation strongly improves precision, but at the cost of substantial recall loss.
+
+This matches the intended direction of the pipeline, but the trade-off is more conservative than expected from threshold tuning.
+
+The recall reduction is larger than observed during out-of-fold threshold optimisation. This does not indicate data leakage or methodological failure. The threshold was tuned on out-of-fold training predictions, while these results are measured on a fully held-out test set. The difference reflects generalisation behaviour under unseen data.
+
+##
+### Confusion Matrix Analysis
+
+| Component | Rule-Based | Transformer | Change | Interpretation |
+|----------|-----------:|------------:|-------:|----------------|
+| TP | 88 | 55 | −33 | Valid entities removed by transformer filtering |
+| FP | 66 | 11 | **−55** | Large reduction in incorrect retained entities |
+| TN | 25 | 80 | **+55** | Strong improvement in correct rejection of invalid candidates |
+| FN | 1 | 34 | +33 | Increased missed valid entities |
+
+![Rule-Based Confusion Matrix](outputs/evaluation/core_plots/rule_confusion_matrix.png)
+
+![Transformer Confusion Matrix](outputs/evaluation/core_plots/transformer_confusion_matrix.png)
+
+The confusion matrices explain the metric shifts:
+
+- **False positives decrease sharply:** 66 → 11  
+- **True negatives increase sharply:** 25 → 80  
+- **False negatives increase:** 1 → 34  
+- **True positives decrease:** 88 → 55  
+
+This shows that the transformer is not randomly changing predictions. It is systematically rejecting more candidates. This improves precision but reduces recall.
+
+The error trade-off is asymmetric:
+
+```text
+False positives reduced: 55
+False negatives added:   33
+```
+
+This means the transformer removes more incorrect entities than valid entities, but the cost in valid entity loss is still substantial.
+
+##
+### Pipeline-Level Interpretation
+
+The pipeline was designed as:
+
+> High-recall extraction → precision-oriented validation
+
+The evaluation confirms that this behaviour is achieved directionally:
+
+| Stage | Observed Behaviour |
+|------|-------------------|
+| Rule-based extraction | Very high recall, low precision |
+| Transformer validation | Much higher precision, lower recall |
+| Tuned threshold | Conservative, prioritising precision over recall |
+
+From a clinical data extraction perspective:
+
+- False positives reduce trust in the generated structured dataset.
+- False negatives reduce coverage and may remove clinically useful signal.
+- The preferred operating point depends on downstream use case.
+
+For downstream structured dataset generation, the transformer output is cleaner and more reliable than the rule-based baseline. However, the lower recall means it is less complete.
+
+The result is therefore best interpreted as:
+
+> The transformer improves output reliability, but the selected global threshold sacrifices substantial coverage.
+
+##
+### Core Evaluation Conclusion
+
+The core evaluation supports the main design claim with an important qualification.
+
+The transformer validation layer successfully acts as a precision-oriented filter:
+
+- Precision improves from 0.571 → 0.833
+- False positives decrease from 66 → 11
+- Accuracy improves from 0.628 → 0.750
+
+However, the thresholded transformer output does not improve F1 score globally:
+
+- Recall decreases from 0.989 → 0.618
+- F1 decreases slightly from 0.724 → 0.710
+
+This means the final model achieves the precision objective, but not a global F1 improvement at the selected threshold.
+
+The result is still methodologically valid and aligned with the intended filtering design, but it indicates that the selected threshold is conservative on the held-out test set. Later stratified analysis is needed to determine whether this trade-off is uniform across entity types or driven by specific categories.
+
+##
+### Implementation of Core Evaluation
+
+Core evaluation is implemented using two scripts in `scripts/evaluation/`.
+
+| Script | Purpose | Output |
+|--------|---------|--------|
+| `evaluation_metrics.py` | Computes scalar metrics and confusion matrix components from `pipeline_predictions.csv` | `outputs/evaluation/core_metrics.csv` |
+| `plot_core_evaluation.py` | Generates metric comparison and confusion matrix visualisations | `outputs/evaluation/core_plots/` |
+
+Generated plots:
+- `metrics_comparison.png`
+- `rule_confusion_matrix.png`
+- `transformer_confusion_matrix.png`
+
+##
+## 11.9 Stratified and Diagnostic Analysis
+
+### Purpose of Secondary Analysis
+
+The core evaluation establishes the global behaviour of the system. Stratified and diagnostic analysis explains where the performance changes occur and why.
+
+This second layer focuses on:
+
+- Performance variation across entity types
+- Whether transformer validation helps all entities equally
+- How the selected threshold affects precision and recall
+- How model probability distributions explain false positives and false negatives
+
+This analysis does not redefine the primary evaluation result. It explains the global precision–recall trade-off observed in Section 11.8.
+
+##
+### Stratified Performance by Entity Type
+
+Aggregate metrics can hide important differences between entity categories. This is important because the three entity types have different linguistic and clinical properties:
+
+| Entity Type | Expected Behaviour |
+|------------|-------------------|
+| `SYMPTOM` | Rule-based extraction is already relatively strong because symptom mentions are often explicit and include negation handling |
+| `INTERVENTION` | Transformer validation should help because rule-based extraction cannot reliably distinguish performed vs planned actions |
+| `CLINICAL_CONDITION` | Transformer validation should help most because condition mentions are often historical, uncertain, resolved, or context-dependent |
+
+![Stratified Metrics](outputs/evaluation/secondary_plots/stratified_metrics.png)
+
+The stratified results confirm that transformer impact is not uniform.
+
+| Entity Type | System | Precision | Recall | F1 Score |
+|------------|--------|----------:|-------:|---------:|
+| `SYMPTOM` | Rule-Based | **0.794** | **0.964** | **0.871** |
+| `SYMPTOM` | Transformer | 0.778 | 0.500 | 0.609 |
+| `INTERVENTION` | Rule-Based | 0.617 | **1.000** | 0.763 |
+| `INTERVENTION` | Transformer | **0.900** | 0.730 | **0.806** |
+| `CLINICAL_CONDITION` | Rule-Based | 0.400 | **1.000** | 0.571 |
+| `CLINICAL_CONDITION` | Transformer | **0.778** | 0.583 | **0.667** |
+
+##
+### Entity-Level Interpretation
+
+#### `SYMPTOM`
+
+| Metric | Change |
+|--------|-------:|
+| Precision | −0.016 |
+| Recall | −0.464 |
+| F1 Score | −0.262 |
+
+The rule-based symptom system already performs strongly, with high precision and high recall. This is expected because symptom extraction uses constrained section filtering, concept-level regex rules, and lightweight negation handling.
+
+The transformer does not improve precision and substantially reduces recall. This indicates over-filtering: the model rejects many valid symptom mentions without meaningfully reducing false positives.
+
+For `SYMPTOM`, the transformer is therefore not beneficial under the current global threshold.
+
+##
+#### `INTERVENTION`
+
+| Metric | Change |
+|--------|-------:|
+| Precision | +0.283 |
+| Recall | −0.270 |
+| F1 Score | +0.043 |
+
+The rule-based intervention extractor has perfect recall but only moderate precision. This reflects the intended recall-oriented design: intervention rules capture broad action candidates but do not determine whether an action was actually performed.
+
+Transformer validation substantially improves precision, increasing it from 0.617 to 0.900. Recall decreases, but F1 improves overall. This indicates that the transformer successfully removes planned, hypothetical, or non-performed intervention candidates while retaining enough valid interventions to improve overall performance.
+
+For `INTERVENTION`, the transformer behaves as intended.
+
+##
+#### `CLINICAL_CONDITION`
+
+| Metric | Change |
+|--------|-------:|
+| Precision | +0.378 |
+| Recall | −0.417 |
+| F1 Score | +0.096 |
+
+The rule-based clinical condition extractor has very low precision because disease-state mentions are highly context-dependent. Conditions may be historical, resolved, suspected, ruled out, or listed in background history.
+
+Transformer validation nearly doubles precision, from 0.400 to 0.778, and improves F1 despite a substantial recall reduction. This indicates that the transformer provides meaningful contextual filtering for condition mentions.
+
+For `CLINICAL_CONDITION`, the transformer provides the strongest correction of baseline error.
+
+##
+### Cross-Entity Comparison
+
+| Entity Type | Transformer Effect | Interpretation |
+|------------|-------------------|----------------|
+| `SYMPTOM` | Harmful filtering | Baseline already strong; transformer removes valid signal |
+| `INTERVENTION` | Beneficial trade-off | Precision improves enough to justify recall loss |
+| `CLINICAL_CONDITION` | Strong correction | Large precision gain offsets recall reduction |
+
+The main pattern is:
+
+> Transformer validation adds value where rule-based extraction is weakest.
+
+It is most useful for semantically ambiguous entities and least useful where deterministic rules already perform well.
+
+This also explains why the global evaluation showed a mixed result: the transformer improves `INTERVENTION` and `CLINICAL_CONDITION`, but harms `SYMPTOM` performance under the same global threshold.
+
+##
+### Precision–Recall Behaviour
+
+The precision–recall curve shows how model performance changes across possible thresholds.
+
+![Precision–Recall Curve](outputs/evaluation/secondary_plots/pr_curve.png)
+
+The selected threshold (`0.549`) lies in a high-precision region of the curve. This explains the large precision gain observed in the core evaluation.
+
+However, the threshold is also conservative. It increases precision by rejecting uncertain predictions, but this necessarily reduces recall.
+
+The curve therefore confirms that the selected threshold is consistent with the pipeline objective:
+
+```text
+higher confidence threshold → fewer false positives → lower recall
+```
+
+This is the intended behaviour for a precision-oriented validation layer, although the recall loss is larger than ideal.
+
+##
+### Probability Distribution Analysis
+
+The model probability distribution explains why the threshold creates both false positives and false negatives.
+
+![Probability Distribution](outputs/evaluation/secondary_plots/probability_distribution.png)
+
+The positive and negative classes show partial separation:
+
+- Valid entities tend to receive higher probabilities.
+- Invalid entities tend to receive lower probabilities.
+- However, the two distributions overlap substantially in the mid-probability range.
+
+This overlap is the main source of error:
+
+| Error Type | Cause |
+|-----------|-------|
+| False positives | Invalid entities with probabilities above the threshold |
+| False negatives | Valid entities with probabilities below the threshold |
+
+The selected threshold falls within this overlap region. There is no clean probability boundary that perfectly separates valid from invalid entities.
+
+This explains the observed trade-off:
+
+- Precision improves because many low-confidence invalid candidates are rejected.
+- Recall decreases because some valid but lower-confidence candidates are also rejected.
+
+The evaluation result is therefore not caused by a pipeline error. It reflects the inherent ambiguity of the validation task and the partial separability of the learned probability scores.
+
+##
+### Diagnostic Interpretation
+
+The diagnostic findings support three conclusions:
+
+1. **The transformer learned meaningful contextual signal:**
+    It assigns higher probabilities to many valid entities and successfully filters many invalid candidates.
+2. **The global threshold is conservative:**
+    It produces high precision but removes a substantial number of valid entities.
+3. **A single global threshold is suboptimal:**
+    Entity types behave differently. SYMPTOM needs less aggressive filtering, while `INTERVENTION` and `CLINICAL_CONDITION` benefit from stronger validation.
+
+This suggests that future versions should use entity-type-specific thresholds rather than one shared threshold across all tasks.
+
+##
+### Implementation
+
+Secondary evaluation is implemented in `scripts/evaluation/plot_secondary_analysis.py`.
+
+The script uses `outputs/evaluation/pipeline_predictions.csv` to generate:
+
+| Output | Purpose |
+|-------|---------|
+| `stratified_metrics.csv` | Entity-type-specific metrics |
+| `stratified_metrics.png` | Visual comparison of metrics by entity type |
+| `pr_curve.png` | Precision–recall behaviour across thresholds |
+| `probability_distribution.png` | Distribution of model probabilities by ground-truth class |
+
+Outputs are saved to `outputs/evaluation/` and plots are saved to `/secondary_plots/`.
+
+##
+## 11.10 Overall Evaluation Synthesis
+
+The evaluation demonstrates that the pipeline behaves as a precision-oriented clinical entity extraction system, but with important entity-specific differences.
+
+At the global level, transformer validation substantially improves precision:
+
+```text
+Precision: 0.571 → 0.833
+False positives: 66 → 11
+```
+
+This confirms that the transformer successfully filters many invalid rule-generated candidates.
+
+However, this comes at a substantial recall cost:
+
+```text
+Recall: 0.989 → 0.618
+False negatives: 1 → 34
+```
+
+The result is a cleaner but less complete output set. F1 score decreases slightly overall because the recall loss outweighs the precision gain at the selected threshold.
+
+The stratified analysis explains this mixed global result:
+
+| Entity Type | Transformer Value |
+|-------------|------------------| 
+| `SYMPTOM` | Negative → over-filtering harms performance |
+| `INTERVENTION` | Positive → precision improves and F1 increases |
+| `CLINICAL_CONDITION` | Positive → large precision gain and F1 improvement |
+ 
+The main conclusion is:
+
+> Transformer validation is valuable for semantically ambiguous entity types, but unnecessary or harmful for entity types already handled well by deterministic rules.
+
+This supports the broader hybrid design while identifying a clear limitation of the current implementation: the same global threshold is applied to all entity types despite different baseline performance and error profiles.
+
+The most important future improvement is therefore:
+
+> Use entity-type-specific validation thresholds, or selectively bypass transformer validation for `SYMPTOM` entities where rule-based extraction already performs strongly.
+
+Overall, the evaluation supports the central design principle of the project:
+
+```text
+1. Rule-based extraction provides broad candidate coverage.
+2. Transformer validation improves contextual precision.
+3. Thresholding controls the final precision–recall operating point.
+```
+
+The final system is suitable for generating a high-confidence structured clinical entity dataset, particularly for interventions and clinical conditions, while future work should focus on improving recall preservation and entity-specific threshold calibration.
+
+
+# 12. End-to-End Inference Pipeline
+
+## 12.1 Purpose and Scope
+
+The end-to-end inference pipeline consolidates the rule-based extraction layer and the trained BioClinicalBERT validation layer into a single reusable system.
+
+This pipeline is used after model development and evaluation to apply the final validated architecture to new clinical notes. It supports:
+
+- Single-report inference
+- Batch inference over multiple notes
+- Large-scale structured dataset generation from the ICU corpus
+- Deployment through an API layer
+
+The inference pipeline does not retrain the model, tune thresholds, or evaluate performance. Those steps are completed earlier. Its role is to apply the final fixed pipeline to unseen clinical text and return structured entity-level outputs.
+
+The operational objective is:
+
+```text
+          Raw clinical note
+                  │
+    Rule-based candidate extraction
+                  │
+  BioClinicalBERT contextual validation
+                  │
+                  ▼
+  Structured entity-level JSON output
+```
+
+
+This section describes how the full system is assembled for inference and how outputs are produced for downstream use.
+
+##
+## 12.2 Unified Pipeline Architecture
+
+The inference system follows the same two-stage architecture evaluated in the previous section:
+
+1. **Rule-based extraction**
+    - Generates high-recall candidate entities from clinical text.
+    - Preserves exact spans, concepts, sections, and sentence context.
+2. **Transformer validation**
+    - Scores each candidate entity using the trained BioClinicalBERT classifier.
+    - Applies the calibrated threshold (0.549) to produce a binary validity decision.
+
+The final inference architecture is implemented as a modular pipeline:
+
+```text
+src/
+  pipeline/
+    extraction.py     → deterministic candidate extraction
+    validation.py     → transformer-based entity validation
+    pipeline.py       → orchestration of extraction + validation
+```
+
+Each module has a single responsibility:
+
+| Module | Responsibility |
+|--------|----------------|
+| `extraction.py` | Runs preprocessing, section parsing, sentence segmentation, and rule-based entity extraction |
+| `validation.py` | Applies BioClinicalBERT to score and validate extracted entities |
+| `pipeline.py` | Orchestrates the complete inference flow and returns structured outputs |
+
+The same pipeline is reused across batch dataset generation and deployment. This avoids separate code paths for research, inference, and API usage.
+
+##
+## 12.3 Inference Flow
+
+```text
+                        Raw Input Data
+                 Clinical note(s) in DataFrame
+                              │
+                              ▼
+                      Preprocessing Layer
+             Text normalisation + artefact removal
+                              │
+                              ▼
+                   Structural Parsing Layer
+            Section extraction + sentence splitting
+                              │
+                              ▼
+                  Rule-Based Extraction Layer
+      SYMPTOM / INTERVENTION / CLINICAL_CONDITION candidates
+                              │
+                              ▼
+                   Candidate Entity Records
+       span + concept + entity type + section + sentence
+                              │
+                              ▼
+               BioClinicalBERT Validation Layer
+       structured input → probability score → thresholding
+                              │
+                              ▼
+                Final Structured JSON Output
+       Candidate entity + provenance + validation object
+```
+
+This diagram represents the inference-time system only. It does not include training, cross-validation, threshold tuning, or evaluation logic.
+
+##
+## 12.4 Extraction Component
+
+The extraction component `extraction.py` performs deterministic candidate generation using the preprocessing, structural parsing, and rule-based extraction functions defined earlier in the pipeline.
+
+##
+### Single-Note Extraction
+
+The single-note function processes one clinical note by applying:
+
+1. Text preprocessing
+2. Section extraction
+3. Sentence segmentation
+4. Symptom extraction
+5. Intervention extraction
+6. Clinical condition extraction
+7. Entity-level schema construction
+
+Conceptually:
+
+```python
+extract_entities_from_note(note_text, note_id, metadata)
+```
+
+This returns a flat list of candidate entities extracted from the note.
+
+Each candidate contains:
+
+- Source identifiers
+- Extracted span
+- Entity type
+- Normalised concept
+- Character offsets
+- Section context
+- Sentence context
+- Placeholder validation fields
+
+##
+### Batch Extraction
+
+Batch extraction processes a DataFrame of notes 
+
+```python
+run_extraction_on_dataframe(df)
+```
+
+The function iterates over input rows, applies single-note extraction, and aggregates all extracted entities into one flat entity-level list. 
+
+This design allows the same extraction logic to support:
+
+- A one-row DataFrame for single-note inference
+- A multi-row DataFrame for batch inference
+- A full ICU corpus DataFrame for large-scale dataset generation
+
+Using a DataFrame-based interface ensures that single and batch inference follow the same code path.
+
+##
+## 12.5 Identifier and Metadata Handling
+
+The pipeline separates source identity, optional patient metadata, and derived NLP fields.
+
+##
+### Source Identity
+
+Each input note requires a `note_id` so that extracted entity records can be linked back to their original note. This is especially important because the output is entity-level; one note has many extracted entity records
+
+For large-scale dataset generation, `note_id` is assigned externally before extraction. This prevents identifier resets during chunked processing and keeps outputs reproducible.
+
+##
+### Optional Metadata
+
+The pipeline can pass through optional metadata fields when available:
+
+- `subject_id`
+- `hadm_id`
+- `icustay_id`
+
+If these fields are absent, they are stored as empty values. This allows the same pipeline to operate on both structured MIMIC-IV datasets and raw single-note inputs.
+
+##
+### Derived NLP Fields
+
+Other fields are generated during inference:
+
+| Field | Source |
+|------|--------|
+| `section` | Section extraction |
+| `sentence_text` | Sentence segmentation |
+| `entity_text` | Regex span extraction |
+| `char_start`, `char_end` | Span alignment |
+| `concept` | Rule-based concept mapping |
+| `entity_type` | Entity-specific extractor |
+
+This preserves provenance while keeping the input interface flexible.
+
+##
+## 12.6 Validation Component
+
+The validation component `validation.py` applies the trained BioClinicalBERT classifier to extracted candidate entities.
+
+Conceptually:
+
+```python
+validate_entities(
+    entities,
+    model,
+    tokenizer,
+    device,
+    threshold=0.549,
+    batch_size=16,
+    max_length=512
+)
+```
+
+The validation workflow is:
+
+1. Convert each entity into the same structured input format used during training:
+
+    ```text
+    [SECTION] {section}
+    [ENTITY TYPE] {entity_type}
+    [ENTITY] {entity_text}
+    [CONCEPT] {concept}
+    [TASK] {task}
+    [TEXT] {sentence_text}
+    ```
+
+2. Tokenise inputs using the saved BioClinicalBERT tokenizer.
+3. Run batched inference using the saved BioClinicalBERT model.
+4. Convert logits into valid-class probabilities: `confidence = p(is_valid = 1)`
+5. Apply the calibrated decision threshold: `is_valid = True if confidence ≥ 0.549`
+6. Write validation outputs back into the existing entity structure.
+
+The model and tokenizer are passed into the function rather than loaded inside it. This avoids repeated model loading, reduces inference overhead, and supports efficient processing of large datasets.
+
+##
+## 12.7 Pipeline Orchestration
+
+The complete inference pipeline is orchestrated by `pipeline.py`.
+
+The main entry point is:
+
+```python
+run_pipeline(df, model, tokenizer, device)
+```
+
+The function performs:
+
+1. Rule-based extraction over the input DataFrame
+2. Transformer validation over extracted entities
+3. Return of structured JSON-compatible entity records
+
+The function does not perform model training, threshold tuning, evaluation, or file saving. These are intentionally handled outside the core inference function.
+
+This separation keeps the pipeline reusable across different use cases:
+
+| Use Case | Pipeline Behaviour |
+|----------|-------------------|
+| Single-note inference | Wrap text in a one-row DataFrame and run the same pipeline |
+| Batch inference | Run pipeline over a multi-row DataFrame |
+| Full-corpus generation | Process the ICU corpus in batches/chunks |
+| API deployment | Load model once, then call pipeline per request |
+
+This design prevents divergence between research inference, large-scale generation, and deployed inference.
+
+##
+## 12.8 Output Schema
+
+The pipeline returns a flat list of JSON-compatible dictionaries, with one record per extracted entity. A single note may therefore generate multiple output records.
+
+Example output:
+
+```json
+{
+  "note_id": "note_1",
+  "subject_id": "66907",
+  "hadm_id": "152136.0",
+  "icustay_id": "279344",
+  "entity_text": "sedated",
+  "concept": "sedation",
+  "entity_type": "INTERVENTION",
+  "char_start": 132,
+  "char_end": 139,
+  "sentence_text": "...",
+  "section": "assessment",
+  "negated": null,
+  "validation": {
+    "is_valid": true,
+    "confidence": 0.92,
+    "task": "intervention_performed"
+  }
+}
+```
+
+The output preserves both rule-based extraction information and transformer-derived validation outputs.
+
+| Output Field | Purpose |
+|--------------|---------|
+| `entity_text` | Exact extracted span |
+| `concept` | Normalised clinical concept |
+| `entity_type` | Entity category |
+| `char_start`, `char_end` | Character-level provenance |
+| `sentence_text` | Local context used for validation |
+| `section` | Document-level context |
+| `negated` | Rule-derived symptom negation signal where applicable |
+| `validation.is_valid` | Final binary validity decision | 
+| `validation.confidence` | BioClinicalBERT probability score |
+| `validation.task` | Entity-specific validation task |
+
+##
+## 12.9 Dataset Strategy
+
+The pipeline is intentionally non-destructive. It does not remove invalid entities during inference. Instead, it preserves all extracted candidates and attaches validation outputs.
+
+This produces two possible downstream dataset views:
+
+| Dataset View | Definition | Use Case | 
+|-------------|------------|---------|
+| Full output dataset | All extracted candidates with validation scores | Auditing, error analysis, threshold review, reproducibility |
+| Filtered valid dataset | Subset where `validation.is_valid == true` | Downstream ML features, high-confidence entity extraction |
+
+This design separates pipeline generation from downstream filtering. The advantage is that downstream users can chnage filtering logic without rerunning extraction and model inference.
+
+For example:
+
+```python
+valid_entities = [
+    entity for entity in entities
+    if entity["validation"]["is_valid"] is True
+]
+```
+
+The full output remains available for inspection, debugging, and future threshold recalibration.
 
 
 ---
 
-## 9. Full Dataset Generation
+## 13. Full-Corpus Dataset Generation
 
 The full dataset was generated only after validation confirmed system reliability.
 
----
 
-## 10. Evaluation
-
-Evaluation is designed to directly reflect the pipeline objective:
-
-- **Precision** → primary metric (correctness of features)
-- **Recall** → controlled trade-off (coverage loss)
-- **F1 score** → overall balance of system behaviour
-- **Confusion matrix** → explicit analysis of FP vs FN trade-offs  
-
-The goal of evaluation is therefore not generic model assessment, but:
-
-- To verify that precision improves over the baseline  
-- To quantify the cost in recall  
-- To ensure that the trade-off aligns with the intended downstream use case  
 
 ---
 
-## 11. Comparative Analysis: Rule-Based vs Transformer
+## 12. Cloud Deployment
+
+
+---
+
+## 13. API Usage 
 
 ---
 
@@ -2594,6 +4048,83 @@ Although it was doubled, the set still remained relatively small for trasnformer
 
 ---
 
+#### 6.4 Future Extensions
+
+The current schema is intentionally text-centric and can be extended in future directions.
+
+**A. Structured Metadata Enrichment**
+
+Additional fields from the ICU corpus can be incorporated:
+
+- `AGE`
+- `GENDER`
+- `LOS_HOURS`
+- `FIRST_CAREUNIT`
+- `CATEGORY`
+- `CHARTTIME`
+
+Purpose:
+
+- Cohort stratification
+- Subgroup analysis
+- Temporal modelling
+- Clinical context enrichment
+
+---
+
+**B. Increased Context-Aware Validation**
+
+Structured metadata can be injected into the transformer input:
+
+Example:
+
+```python
+[AGE] 74
+[GENDER] F
+[CAREUNIT] MICU
+[TEXT] ...
+```
+
+Expected benefits:
+
+- Improved classification robustness
+- Reduced ambiguity in entity interpretation
+- Better calibration across patient subgroups
+
+---
+
+**C. Multi-Modal Clinical Modelling**
+
+The dataset can be extended into a multi-modal representation layer combining:
+
+- Unstructured clinical text (current pipeline output)
+- Structured EHR variables
+- Entity-level features
+
+Downstream applications:
+
+- Patient risk prediction
+- Outcome modelling
+- Clinical decision support systems
+- Similarity search over patient cohorts
+
+---
+
+**D. Feature Store Integration**
+
+Rather than modifying the pipeline, metadata can be joined downstream via a feature store approach.
+
+This enables:
+
+- Reproducible dataset variants
+- Experiment tracking across feature configurations
+- Separation of NLP extraction vs predictive modelling pipelines
+
+---
+
+
+---
+
 ## 17. Potential Clinical Integration
 
 ## 2. Downstream Applications and Requirements
@@ -2616,15 +4147,6 @@ Structured clinical entities are used in several types of downstream tasks, each
 - **Clinical decision support**   
   - Triggering alerts or interventions
   - Requires extremely high recall (missing signals is unsafe)  
-
----
-
-## 12. Cloud Deployment
-
-
----
-
-## 13. API Usage 
 
 ---
 

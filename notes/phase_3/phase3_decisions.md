@@ -4283,20 +4283,21 @@ Key properties:
 
 ```text
                   ┌────────────────────────────────────────────┐
-                  │            Structured Inputs               │
+                  │         Structured Candidate Inputs        │
                   ├────────────────────────────────────────────┤
-                  │ SECTION          → categorical context     │
-                  │ ENTITY TYPE      → entity class            │
-                  │ ENTITY           → extracted span          │
-                  │ CONCEPT          → semantic label          │
-                  │ TASK             → validation objective    │
-                  │ TEXT             → full sentence context   │
+                  │ SECTION      → document context            │
+                  │ ENTITY TYPE  → entity class                │
+                  │ ENTITY       → extracted candidate span    │
+                  │ CONCEPT      → normalised clinical concept │
+                  │ TASK         → validation objective        │
+                  │ TEXT         → full sentence-level context │
                   └────────────────────────────────────────────┘
                                         │
                                         ▼
           ┌──────────────────────────────────────────────────────────────┐
-          │        Input Serialisation (Prompt Construction)             │
+          │                   Input Serialisation                        │
           │ [SECTION] ... [ENTITY TYPE] ... [ENTITY] ... [TEXT] ...      │
+          │ [CONCEPT] ... [TASK] ...                                     │       
           └──────────────────────────────────────────────────────────────┘
                                         │
                                         ▼
@@ -4332,7 +4333,7 @@ Key properties:
                                         │
                                         ▼
           ┌──────────────────────────────────────────────────────────────┐
-          │     Sequence Representation ([CLS] final hidden state)       │
+          │     [CLS] Sequence Representation (final hidden state)       │
           │ 768-dimensional contextual embedding                         │
           └──────────────────────────────────────────────────────────────┘
                                         │
@@ -4354,7 +4355,7 @@ Key properties:
           ┌──────────────────────────────────────────────────────────────┐
           │           External Threshold Decision Policy                 │
           │ Precision-maximisation under recall constraint               │
-          │ (recall ≥ 0.85 × baseline)                                   │
+          │ (recall ≥ 0.85 × baseline) = Accept if p(valid) ≥ 0.549      │
           └──────────────────────────────────────────────────────────────┘
 ```
 
