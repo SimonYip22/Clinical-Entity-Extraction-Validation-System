@@ -3941,400 +3941,321 @@ Example Response (simplified):
 
 # 16. Methodological Rationale and Design Reflection
 
-defense of design choices and alignment with project goals
+## 16.1 Purpose of the Hybrid Design
 
-* Why hybrid > alternatives
-* Why precision-first
-* Why no NER / CRF / LLM
-* Trade-offs
+The project was designed as a hybrid clinical NLP pipeline rather than a fully end-to-end model-based extraction system. The central methodological decision was to separate candidate generation from contextual validation.
 
-The system follows a hybrid architecture combining deterministic rules with a transformer-based validation model.
+This was necessary because the outputs needed to be more than extracted text spans: they needed to be structured, auditable, schema-aligned, and suitable for downstream analysis or machine-learning feature generation.
 
-- Rule-based layer performs high-precision candidate extraction using section-aware logic  
-- Transformer layer performs sentence-level validation to reduce false positives  
+The rule-based layer provides span provenance and schema control. The transformer layer provides contextual interpretation for ambiguity that rules cannot reliably resolve.
 
-This separation reflects practical constraints:
+The result is a pipeline-centric design rather than a model-centric design: BioClinicalBERT is used as one controlled validation component within a broader clinical information extraction system.
 
-- Limited annotated data  
-- Need for precision in clinical extraction tasks  
-- Requirement for interpretable and auditable outputs  
+##
+## 16.2 Key Design Constraints and Trade-offs
 
-The pipeline is intentionally designed as:
+The pipeline was shaped by several practical constraints:
 
-- Precision-first rather than recall-maximised  
-- Pipeline-centric rather than model-centric  
-- Focused on structured outputs for downstream use 
+- Limited manually annotated data
+- Need for exact span-level provenance
+- Fixed entity schema requirements
+- High cost of false positives in downstream structured datasets
+- Requirement for reproducible offline and API-based inference
 
+These constraints favoured a controlled hybrid architecture over unrestricted sequence labelling or generative extraction.
 
-### Why Hybrid Rather Than Fully Model-Based Extraction
+The main trade-off is that the rule layer must first generate a candidate before the transformer can validate it. This makes the pipeline interpretable and auditable, but it also means missed rule-based candidates cannot be recovered downstream.
 
-A fully model-based extraction approach was avoided because it reduces deterministic control over span extraction, schema adherence, and output traceability.
+| Design Choice | Benefit | Limitation |
+|--------------|---------|------------|
+| Rule-based candidate extraction | Exact spans, schema control, deterministic behaviour | Recall limited by predefined patterns |
+| BioClinicalBERT validation | Context-aware filtering of ambiguous candidates | Can reject valid entities under strict thresholds |
+| Precision-oriented thresholding | Cleaner retained outputs and fewer false positives | Lower recall |
+| Modular pipeline | Easier debugging and component-level evaluation | Errors can propagate between stages |
+| Structured JSON output | Flexible downstream use and auditability | Not a formal interoperability standard |
 
-The hybrid architecture separates the task into:
+The system therefore prioritises controlled extraction and reliable retained outputs over maximal coverage.
 
-- **Candidate generation:** deterministic, auditable, schema-bounded extraction
-- **Contextual validation:** learned classification using sentence-level context
+##
+## 16.3 Why Precision Was Prioritised
 
-This avoids using rules for complex contextual reasoning while avoiding unrestricted model-based extraction.
+The final outputs are intended for downstream analysis and machine-learning workflows, where extracted entities may become structured features.
 
-### Hybrid Architecture as a Constraint-Driven Decision
+In this setting, false positives are particularly harmful because they introduce incorrect clinical signal into downstream datasets. A false positive can make it appear that a symptom, intervention, or clinical condition was present when it was not. Once encoded as a structured feature, this error may be difficult to detect later.
 
-The hybrid design is deliberate and role-separated.
+False negatives are also undesirable, but they usually represent missing information rather than incorrect information. For structured dataset generation, this made precision more important than maximising recall. This would not necessarily hold for all clinical use cases; for example, a live decision-support system may require much higher recall.
 
-**Deterministic rule layer:**
-- High-precision candidate generation  
-- Transparent regex-based logic  
-- Section-aware extraction  
-- Auditable and reproducible behaviour  
+This explains the thresholding strategy: the validation layer was tuned to behave as a conservative filter, retaining fewer entities but improving the reliability of those retained.
 
-**Transformer layer (ClinicalBERT):**
-- Sentence-level binary validation  
-- False-positive filtering  
-- Limited category disambiguation  
-- No sequence tagging or generative use  
+##
+## 16.4 Consequences for System Performance
 
-The transformer does not perform primary extraction.  
-It operates strictly as a controlled validation component.
+The evaluation results reflect the expected behaviour of this design.
 
-This separation reflects:
+BioClinicalBERT validation substantially improved precision and reduced false positives compared with the rule-based baseline, but this came at the cost of lower recall. This is not an implementation failure; it is the direct consequence of using the transformer as a precision-oriented validation layer rather than a recall-maximising extractor.
 
-- Awareness of precision requirements in clinical pipelines  
-- Understanding of transformer brittleness in low-resource settings  
-- Practical handling of limited annotation budgets  
-- Avoidance of unnecessary sequence-tagging complexity  
+The results also showed that a universal precision-oriented strategy is not optimal across all entity types:
 
-The architecture mirrors production-oriented clinical NLP systems where deterministic logic constrains probabilistic components.
+- For `INTERVENTION` and `CLINICAL_CONDITION`, where contextual ambiguity is high, transformer validation improved final output quality.
+- For `SYMPTOM`, where rule-based extraction and negation handling were already relatively strong, additional transformer filtering removed too many valid entities.
 
-### Candidate Generation vs Validation
+This means the correct design lesson is not simply “use stricter transformer validation.” The better conclusion is that validation should be entity-specific: ambiguous entity types benefit from conservative transformer filtering, while already reliable rule-based outputs may require lighter validation, lower thresholds, or bypass logic.
 
-The system is not uniformly precision-first at the rule level. Instead, precision is enforced at the system level after transformer validation.
+##
+## 16.5 Core Insights and Practical Implications
 
-For linguistically variable entity types such as `INTERVENTION` and `CLINICAL_CONDITION`, broader candidate generation is required. The validation layer then filters ambiguous or invalid candidates.
+The main methodological insight is that clinical NLP systems should be designed around the intended use of their outputs, not around model complexity alone.
 
-### Failure Mode Separation
+For this work, the goal was not to show that BioClinicalBERT can replace rule-based extraction. The goal was to build a controlled pipeline where deterministic extraction and transformer validation perform different roles. 
 
-The modular design makes failure modes easier to inspect:
+This design demonstrates a realistic applied clinical NLP workflow:
 
-| Component | Failure Mode |
-|----------|--------------|
-| Rule layer | Missed candidates → recall limitation |
-| Validation layer | Incorrect filtering/classification → precision limitation |
+- Rules define what can be extracted.
+- BioClinicalBERT determines what should be retained.
+- The output schema preserves provenance, context, and validation results.
+- Evaluation identifies where the architecture helps and where it over-filters.
 
-This separation improves debugging, maintainability, and auditability compared with a single end-to-end extraction model.
+The evaluation suggests a clear future direction: entity-specific validation strategies may be preferable to uniform filtering. Symptoms may benefit from lighter transformer intervention or rule-based bypass logic, while interventions and clinical conditions may benefit from stricter contextual validation.
 
-## Selected Use Case and Design Consequences
-
-This pipeline is explicitly optimised for structured dataset generation for downstream modelling and analysis. In this setting:
-
-- Extracted entities act as model features
-- Data quality directly determines model validity
-
-Error impact is therefore asymmetric:
-
-- **False Positives (FP)**  
-  - Introduce incorrect features  
-  - Corrupt models and analyses  
-  - Difficult to detect downstream  
-  → **High cost**
-
-- **False Negatives (FN)**  
-  - Represent missing features  
-  - Reduce completeness but do not introduce noise  
-  → **Lower cost (within limits)**  
-
-This leads to the core design principle:
-
-> Precision is prioritised over recall
-
-The system therefore accepts controlled loss in recall to ensure that retained entities are reliable.
-
-##Methodological Rationale & Design Reflection
-
-### Design Trade-offs
-
-The system prioritises control, auditability, and structured outputs over maximal end-to-end optimisation.
-
-Key trade-offs:
-
-| Trade-off | Benefit | Limitation |
-|----------|---------|------------|
-| Candidate generation vs precision | Broader rules improve candidate coverage | Final precision depends on transformer filtering |
-| Determinism vs linguistic coverage | Exact span traceability and reproducibility | Recall is limited by predefined patterns |
-| Modular separation vs error propagation | Clear failure attribution and easier debugging | Missed rule candidates cannot be recovered downstream |
-| Auditability vs end-to-end optimisation | Transparent, inspectable outputs | No joint optimisation across extraction and validation |
-
-The final design is therefore optimised for controlled clinical information extraction rather than benchmark-maximising NER performance.
-
-## Scope
-
-### In Scope
-
-- Rule-based entity extraction  
-- Transformer-based validation (ClinicalBERT)  
-- Structured JSON output  
-- Lightweight evaluation  
-- Minimal API-based deployment (FastAPI + Docker + Cloud Run + CI/CD)
-
-### Out of Scope
-
-- Ontology mapping (e.g. SNOMED CT)  
-- Interoperability standards (e.g. FHIR)  
-- Large-scale annotation  
-- Full production infrastructure or scaling optimisation  
-
-
-## Deliberate Scope Reductions and Rationale
-
-### SNOMED Mapping — Excluded
-
-- High manual and cognitive overhead
-- Ontology engineering rather than NLP signal
-- Clinical knowledge already implied by background
-
-Referenced only as a logical extension.
+Overall, this shows that in clinical NLP the strongest design is not necessarily the most model-heavy design. A hybrid system can provide a better balance of traceability, reproducibility, contextual interpretation, and downstream usability than either rules or transformers alone.
 
 ---
 
-### FHIR Output — Excluded
+# 17. Limitations
 
-- Adds format complexity without improving ML signal
-- More relevant to interoperability or product roles
+## 17.1 Overview
 
-Structured JSON preserves flexibility and clarity.
+This project delivers an end-to-end hybrid clinical NLP pipeline, but several constraints limit its generalisability, recall, evaluation certainty, and clinical applicability. Key limitations include:
 
----
+- Single-source retrospective MIMIC-IV ICU note data
+- Limited manually annotated validation data
+- Rule-dependent candidate generation
+- Sentence-level transformer validation
+- Precision-oriented filtering with reduced recall
+- Constrained entity schema
+- Internal evaluation only
+- Inference-only deployment without full MLOps or clinical integration
 
-### ICU Predictor Integration — Excluded
+These limitations position the system as a research-focused clinical NLP and data engineering project, not a clinically deployable information extraction service.
 
-- Already demonstrated in the ICU predictor project
-- Would duplicate signal
-- Increases reviewer cognitive load if predictor was integrated
+##
+## 17.2 Data, Annotation, and Generalisability
 
-Referenced conceptually, not implemented.
+The pipeline was developed on a filtered MIMIC-IV ICU note corpus. Although this provides realistic clinical text, it remains a single-source retrospective dataset. Key constraints:
 
----
+- **Single-source data:** Documentation style, abbreviations, section structure, and clinical workflow may differ across hospitals, EHR systems, specialties, and countries.
+- **ICU-specific scope:** The system was designed around ICU progress notes and may not transfer directly to discharge summaries, outpatient letters, emergency department notes, radiology reports, or primary care records.
+- **Limited annotation scale:** BioClinicalBERT was fine-tuned on 1,200 manually annotated entity examples, which is modest for supervised transformer training.
+- **Annotation ambiguity:** Validity labels require judgement about negation, temporality, uncertainty, activity status, and planned versus performed interventions. Some examples are inherently ambiguous even for human clinician annotators.
 
-## Entity-Type Behaviour and Error Tolerance
+These constraints mean that reported performance should be interpreted as internal validation on a controlled retrospective corpus, not evidence of broad clinical robustness.
 
-Error tolerance is not uniform across entity types:
+##
+## 17.3 Extraction and Validation Limitations
 
-**State-Based Entities (Symptoms, Clinical Conditions)**
+The pipeline depends on rule-based extraction before transformer validation. This provides exact span provenance and schema control, but it also bounds recall.
 
-- Often repeated or contextually redundant  
-- Signal can be preserved even if some mentions are missed  
-- False negatives are more tolerable
+If the rule layer fails to generate a candidate entity, the transformer cannot recover it. Missed lexical variants, uncommon abbreviations, spelling variation, or unexpected phrasing therefore remain unrecoverable downstream.
 
-**Event-Based Entities (Interventions)**
+The transformer validation layer also has limitations. It operates primarily on sentence-level context, but some clinical validity decisions require wider note-level, admission-level, or temporal context. For example, whether a condition is active, historical, resolving, or clinically relevant may depend on information outside the local sentence.
 
-- Discrete, non-redundant clinical events  
-- Each instance carries specific meaning  
-- False negatives represent true information loss
+The precision-oriented threshold reduced false positives but also reduced recall. Evaluation showed this trade-off was not uniform across entity types: transformer validation improved output quality for `INTERVENTION` and `CLINICAL_CONDITION`, but degraded `SYMPTOM` performance where rule-based extraction and negation handling were already relatively strong.
 
-Implication:
+This suggests that a single global validation threshold is too coarse. Entity-specific thresholds, bypass logic, or wider-context validation may be required for stronger performance.
 
-- A single global threshold may disproportionately affect entity types  
-- Precision-oriented filtering is likely to impact event-based entities more strongly
+##
+## 17.4 Evaluation Limitations
 
-This is an inherent limitation of a uniform decision boundary.
+- **No external validation:** The pipeline was not tested on another institution, dataset, specialty, or note type.
+- **No prospective validation:** Performance on newly generated or real-time clinical documentation is unknown.
+- **Limited held-out test size:** Reported metrics may be sensitive to sample composition.
+- **No formal inter-annotator agreement:** Annotation consistency was not quantified across multiple independent annotators.
+- **Limited qualitative error analysis:** The evaluation identifies precision, recall, F1, false positives, and false negatives, but does not fully characterise all linguistic or clinical failure modes.
+- **No downstream task validation:** Extracted entities were not tested as features in a downstream predictive model, cohorting workflow, audit task, or clinical retrieval system.
 
-## Alignment with Pipeline Design Choices
+The evaluation therefore demonstrates internal pipeline behaviour and component-level trade-offs, but does not establish external generalisability or clinical effectiveness.
 
-The pipeline components directly reflect the selected objective:
+##
+## 17.5 Scope and Output Limitations
 
-- **Rule-based extraction**
-  - High recall candidate generation  
-  - Minimal filtering  
+The entity schema is intentionally limited to `SYMPTOM`, `INTERVENTION`, and `CLINICAL_CONDITION`. This keeps the project focused and auditable, but limits clinical coverage. The system does not currently support:
 
-- **Transformer validation**
-  - Precision-oriented filtering  
-  - Removes incorrect or ambiguous entities  
+- Medication extraction
+- Laboratory or vital-sign extraction
+- Relation extraction
+- Severity grading
+- Longitudinal entity tracking across notes
+- SNOMED CT, ICD, UMLS, or other ontology mapping
+- FHIR/HL7 output
 
-- **Threshold tuning**
-  - Optimised using out-of-fold predictions  
-  - Maximises precision under a recall constraint  
-  - Defines the operating point of the system  
+These are deliberate scope exclusions. Adding them would require additional extraction logic, normalisation rules, terminology mapping, annotation, and validation. The current JSON output is suitable for inspection and downstream ML feature generation, but it is not a formal interoperability standard.
 
-- **Output structure**
-  - Binary predictions (`model_pred`)
-  - Probabilities (`model_prob`)  
+##
+## 17.6 Deployment and Clinical Integration Limitations
 
-This design allows for:
+The deployed FastAPI service demonstrates production-style inference, but it is not a full production or MLOps system.
 
-- Flexible threshold adjustment  
-- Downstream modelling  
-- Calibration and uncertainty analysis  
+Main deployment limitations:
 
-This corresponds to a standard and well-established pattern:
+| Limitation | Consequence |
+|-----------|-------------|
+| No authentication or access control | API is suitable only as a demonstration endpoint, not a protected clinical service |
+| No request logging or database persistence | No longitudinal audit trail or retained inference history |
+| No monitoring or alerting | No operational visibility into latency, errors, uptime, or usage patterns |
+| No model versioning or drift detection | Cannot track model degradation or distribution shift over time |
+| No automated retraining pipeline | Model updates remain manual rather than continuous |
+| No EHR integration | Outputs are not embedded into clinical workflow |
 
-> Candidate generation → learned validation
+The system has also not undergone clinician review, prospective safety testing, workflow evaluation, regulatory assessment, or clinical impact analysis.
 
-
----
-
-#### Modular Separation vs Error Propagation
-
-- Separation of extraction and validation improves:
-  - Debuggability (clear attribution of failure source)  
-  - Maintainability (independent component tuning)  
-
-- However:
-  - Errors propagate across stages:
-    - Missed candidates → unrecoverable recall loss  
-    - Misclassification → precision loss  
-
-**Implication**
-- Pipeline performance is constrained by weakest stage  
-- No mechanism for downstream recovery of missed entities  
+The deployed API should therefore be interpreted as an inference-only deployment demonstration. It shows that the NLP pipeline can be packaged and served reproducibly, but it should not be used for automated diagnosis, treatment decisions, escalation decisions, or live clinical safety-netting.
 
 ---
 
-#### Auditability vs End-to-End Optimisation
+# 18. Future Work
 
-- Hybrid design enables:
-  - Full traceability from output to source span  
-  - Transparent decision boundaries  
-  - Structured, inspectable failure modes  
+## 18.1 Overview and Rationale
 
-- Compared to end-to-end ML systems:
-  - May underperform on benchmark extraction metrics  
-  - Cannot leverage joint optimisation across tasks  
+Future work should focus on improving validation robustness, expanding clinical coverage, strengthening evaluation, and progressing the deployed API toward a more complete production-style system.
 
-**Implication**
-- System is optimised for interpretability and clinical safety  
-- Not for maximal benchmark performance  
+Future progress centres on five directions:
 
----
+1. **Entity-specific validation** → improve the precision-recall balance across `SYMPTOM`, `INTERVENTION`, and `CLINICAL_CONDITION`
+2. **Larger annotation and stronger evaluation** → improve label reliability, quantify failure modes, and test generalisation
+3. **Wider clinical context** → incorporate section, note-level, temporal, and metadata-aware validation
+4. **Expanded output utility** → extend the schema and connect outputs to downstream modelling workflows
+5. **Production-readiness** → add authentication, logging, monitoring, versioning, and drift detection
 
-#### System-Level Design Position
+These extensions would move the system from a research-focused clinical NLP pipeline toward a more robust, generalisable, and operationally maintainable extraction service.
 
-- Prioritises:
-  - Deterministic behaviour  
-  - Schema control  
-  - Traceability and auditability  
+##
+## 18.2 Validation and Model Improvements
 
-- Accepts:
-  - Bounded recall  
-  - Dependence on validation layer  
-  - Lack of global optimisation  
+The most important technical extension is to replace the current uniform validation strategy with entity-specific validation policies.
 
-**Conclusion**
-The architecture reflects a deliberate bias toward controlled, explainable extraction suitable for clinical and audit-sensitive environments, rather than maximising raw extraction performance.
+Evaluation showed that BioClinicalBERT validation improved output quality for `INTERVENTION` and `CLINICAL_CONDITION`, but degraded `SYMPTOM` performance where rule-based extraction and negation handling were already relatively strong. Future work should therefore include:
 
+- **Entity-specific thresholds:** Tune separate thresholds for each entity type rather than applying one global decision boundary.
+- **Rule-based bypass logic:** Allow high-confidence symptom mentions to bypass transformer filtering where deterministic extraction is already reliable.
+- **Wider-context validation:** Extend model inputs beyond a single sentence to include neighbouring sentences, section-level context, or note-level context.
+- **Calibration analysis:** Improve confidence score reliability if probabilities are used for review prioritisation, ranking, or downstream filtering.
 
+These changes would preserve the benefits of transformer validation while reducing avoidable recall loss.
 
----
+##
+## 18.3 Annotation and Evaluation Enhancements
 
+The validation model was trained on a limited manually annotated dataset. Future work should strengthen both annotation quality and evaluation robustness. Key extensions include:
 
-## 17. Limitations
+- Expanding the annotated dataset, especially for ambiguous cases involving uncertainty, temporality, resolved conditions, and planned interventions
+- Introducing multiple annotators and measuring inter-annotator agreement
+- Performing systematic qualitative error analysis of false positives and false negatives
+- Evaluating on external datasets, institutions, specialties, or note types
+- Testing whether extracted entities improve downstream tasks such as cohort identification, audit, information retrieval, or predictive modelling
 
-Early validation experiments indicated that the initial annotation set was too small for stable transformer fine-tuning. The dataset was therefore expanded before final cross-validation and model selection. This reflects the main practical constraint of supervised clinical NLP: model quality is limited by annotation quality and coverage.
-Although it was doubled, the set still remained relatively small for trasnformer training, and so ould be a source of i=suboptimal mdoel performace. however the more likely source of performance limitation is the inherent difficulty of the validation task, which requires complex contextual interpretation that may be beyond the capabilities of a sentence-level transformer classifier. where even the manual annotation task is challenging and subjective, model performance is likely to be limited by the inherent ambiguity of the task rather than the size of the training set. This reflects a fundamental limitation of using transformer-based validation for complex contextual classification in clinical text, where even human annotators may struggle to achieve high agreement.
+These steps would clarify whether the pipeline generalises beyond MIMIC-IV ICU notes and whether the extracted entities are useful in practical research workflows.
 
----
+##
+## 18.4 Schema, Context, and Downstream Modelling
 
-## 18. Future Work
+The current schema is intentionally limited to `SYMPTOM`, `INTERVENTION`, and `CLINICAL_CONDITION`. Future versions could expand coverage while preserving auditability and schema control. Potential extensions include:
 
----
+- Medication extraction
+- Attribute extraction for severity, certainty, temporality, and clinical status
+- Ontology mapping to SNOMED CT, UMLS, ICD, or other controlled vocabularies
+- FHIR/HL7-compatible outputs after stronger validation
+- Metadata enrichment using fields such as `AGE`, `GENDER`, `LOS_HOURS`, `FIRST_CAREUNIT`, `CATEGORY`, and `CHARTTIME`
 
-#### Future Extensions
+Structured metadata could support cohort stratification, subgroup analysis, temporal ordering, and richer downstream feature construction. Longer term, extracted entities could be combined with structured EHR data such as vitals, labs, medications, and outcomes to support multimodal clinical modelling.
 
-The current schema is intentionally text-centric and can be extended in future directions.
+The priority should be controlled extension rather than broad entity expansion. New output categories should be added only where they improve downstream utility without compromising precision or interpretability.
 
-**A. Structured Metadata Enrichment**
+##
+## 18.5 Deployment and MLOps Extensions
 
-Additional fields from the ICU corpus can be incorporated:
+Future work should extend the inference-only deployment toward a more complete MLOps system. Priority extensions include:
 
-- `AGE`
-- `GENDER`
-- `LOS_HOURS`
-- `FIRST_CAREUNIT`
-- `CATEGORY`
-- `CHARTTIME`
+- Authentication and access control
+- Request logging and audit trails
+- Monitoring for latency, error rates, uptime, and request volume
+- Model versioning and rollback support
+- Drift detection for input text distribution, entity frequencies, confidence scores, and validation rates
+- Batch inference endpoints for multi-note processing
+- Controlled retraining workflows using newly annotated data
 
-Purpose:
+These additions would improve maintainability, observability, and operational robustness while remaining separate from clinical deployment approval.
 
-- Cohort stratification
-- Subgroup analysis
-- Temporal modelling
-- Clinical context enrichment
+##
+## 18.6 Clinical and Research Validation
 
----
+Before any clinical use, the pipeline would require independent clinician review, prospective validation, workflow testing, and governance assessment.
 
-**B. Increased Context-Aware Validation**
+The appropriate next clinical step is not automated decision support. It is clinician-reviewed validation of whether the structured outputs are accurate, useful, and safe enough for research, audit, cohorting, or downstream modelling.
 
-Structured metadata can be injected into the transformer input:
-
-Example:
-
-```python
-[AGE] 74
-[GENDER] F
-[CAREUNIT] MICU
-[TEXT] ...
-```
-
-Expected benefits:
-
-- Improved classification robustness
-- Reduced ambiguity in entity interpretation
-- Better calibration across patient subgroups
+Overall, future work should preserve the works’s core design principle: controlled, auditable clinical NLP outputs first; broader integration and automation only after stronger validation.
 
 ---
 
-**C. Multi-Modal Clinical Modelling**
+# 19. Potential Clinical and Research Integration
 
-The dataset can be extended into a multi-modal representation layer combining:
+## 19.1 Downstream Use Cases
 
-- Unstructured clinical text (current pipeline output)
-- Structured EHR variables
-- Entity-level features
+Different downstream applications require different precision-recall trade-offs. The current system is optimised primarily for structured dataset generation, where false positives can corrupt downstream features.
 
-Downstream applications:
+| Use Case | Potential Role of the Pipeline | Main Requirement |
+|---------|-------------------------------|------------------|
+| Structured dataset generation | Convert validated entities into tabular features for analysis or ML | High precision |
+| Cohort identification | Identify patients with documented symptoms, interventions, or conditions | Balanced precision and recall |
+| Clinical audit | Quantify documented clinical concepts across ICU notes | High precision and transparent provenance |
+| Information retrieval | Index notes by extracted clinical entities | High recall |
+| Clinical summarisation | Support structured summaries of relevant findings | Balanced precision and recall |
+| Decision-support research | Provide candidate signals for prototype risk or workflow tools | Very high validation standard |
 
-- Patient risk prediction
-- Outcome modelling
-- Clinical decision support systems
-- Similarity search over patient cohorts
+The current precision-oriented design is best aligned with structured dataset generation, audit, and downstream ML feature construction. Other use cases, especially information retrieval or decision support, would require different thresholds, stronger recall, external validation, and clinician review.
 
----
+##
+## 19.2 Integration With Downstream Modelling
 
-**D. Feature Store Integration**
+The extracted entities could be converted into patient-level, admission-level, or time-windowed features for downstream modelling. Possible feature representations include:
 
-Rather than modifying the pipeline, metadata can be joined downstream via a feature store approach.
+- Binary indicators for whether an entity was documented
+- Counts of symptoms, interventions, or clinical conditions
+- Section-specific entity features
+- Time-windowed entity features based on `CHARTTIME`
+- Entity confidence scores or validation thresholds
+- Aggregated features by ICU stay, note type, or care unit
 
-This enables:
+These features could complement structured EHR variables such as vitals, laboratory results, medications, demographics, and outcomes.
 
-- Reproducible dataset variants
-- Experiment tracking across feature configurations
-- Separation of NLP extraction vs predictive modelling pipelines
+This provides a natural connection to downstream clinical ML systems: the NLP pipeline converts narrative documentation into structured signals, while predictive models use those signals alongside structured EHR data.
 
----
+##
+## 19.3 Practical Integration Pathway
 
+A realistic integration pathway would progress in stages:
 
----
+1. **Retrospective research use**
+   - Apply the pipeline to historical notes.
+   - Review extracted entities.
+   - Use outputs for cohorting, audit, or exploratory ML features.
 
-## 19. Potential Clinical Integration
+2. **Clinician-reviewed validation**
+   - Present extracted entities to clinicians for review.
+   - Analyse false positives, false negatives, and entity-specific failure modes.
+   - Refine thresholds and validation policies.
 
-### Downstream Applications and Requirements
+3. **Research workflow integration**
+   - Use outputs in controlled research datasets, dashboards, or retrieval systems.
+   - Combine text-derived entities with structured EHR variables.
 
-Structured clinical entities are used in several types of downstream tasks, each with different performance requirements:
+4. **Prospective shadow-mode testing**
+   - Run the pipeline on new notes without influencing care.
+   - Monitor performance, latency, drift, and clinical usefulness.
 
-- **Structured dataset generation (primary use case)**  
-  - Entities are converted into tabular features for:
-    - Machine learning models (e.g. risk prediction)
-    - Cohort selection
-    - Epidemiological analysis  
-  - Requires high precision  
-  - Incorrect entities become incorrect features and corrupt downstream outputs  
-- **Clinical summarisation**  
-  - Aggregation of key findings into structured summaries  
-  - Requires balanced precision and recall  
-- **Information retrieval**  
-  - Searching or indexing clinical concepts  
-  - Requires high recall (missing entities reduces retrievability)  
-- **Clinical decision support**   
-  - Triggering alerts or interventions
-  - Requires extremely high recall (missing signals is unsafe)  
+5. **Clinical workflow consideration**
+   - Only after external validation, clinician review, governance approval, monitoring, and safety assessment should integration into clinical workflows be considered.
+
+The most appropriate near-term use is therefore not automated decision-making. It is retrospective, clinician-reviewable structured information extraction for research, audit, cohort discovery, and downstream modelling.
 
 ---
 
