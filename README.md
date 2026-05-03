@@ -4006,16 +4006,12 @@ This means the correct design lesson is not simply “use stricter transformer v
 
 The main methodological insight is that clinical NLP systems should be designed around the intended use of their outputs, not around model complexity alone.
 
-For this work, the goal was not to show that BioClinicalBERT can replace rule-based extraction. The goal was to build a controlled pipeline where deterministic extraction and transformer validation perform different roles. 
-
-This design demonstrates a realistic applied clinical NLP workflow:
+For this work, the goal was not to show that BioClinicalBERT can replace rule-based extraction. The goal was to build a controlled pipeline where deterministic extraction and transformer validation perform different roles:
 
 - Rules define what can be extracted.
 - BioClinicalBERT determines what should be retained.
 - The output schema preserves provenance, context, and validation results.
 - Evaluation identifies where the architecture helps and where it over-filters.
-
-The evaluation suggests a clear future direction: entity-specific validation strategies may be preferable to uniform filtering. Symptoms may benefit from lighter transformer intervention or rule-based bypass logic, while interventions and clinical conditions may benefit from stricter contextual validation.
 
 Overall, this shows that in clinical NLP the strongest design is not necessarily the most model-heavy design. A hybrid system can provide a better balance of traceability, reproducibility, contextual interpretation, and downstream usability than either rules or transformers alone.
 
@@ -4027,14 +4023,14 @@ Overall, this shows that in clinical NLP the strongest design is not necessarily
 
 This project delivers an end-to-end hybrid clinical NLP pipeline, but several constraints limit its generalisability, recall, evaluation certainty, and clinical applicability. Key limitations include:
 
-- Single-source retrospective MIMIC-IV ICU note data
-- Limited manually annotated validation data
-- Rule-dependent candidate generation
-- Sentence-level transformer validation
-- Precision-oriented filtering with reduced recall
-- Constrained entity schema
+- Single-source retrospective ICU note data
+- Limited annotated validation data
+- Rule-dependent recall
+- Sentence-level contextual validation
+- Precision-oriented filtering with entity-specific trade-offs
+- Constrained schema coverage
 - Internal evaluation only
-- Inference-only deployment without full MLOps or clinical integration
+- Inference-only deployment without clinical integration
 
 These limitations position the system as a research-focused clinical NLP and data engineering project, not a clinically deployable information extraction service.
 
@@ -4053,15 +4049,13 @@ These constraints mean that reported performance should be interpreted as intern
 ##
 ## 17.3 Extraction and Validation Limitations
 
-The pipeline depends on rule-based extraction before transformer validation. This provides exact span provenance and schema control, but it also bounds recall.
+The pipeline depends on rule-based extraction before transformer validation. This provides exact span provenance and schema control, but also bounds recall: if the rule layer fails to generate a candidate entity, the transformer cannot recover it.
 
-If the rule layer fails to generate a candidate entity, the transformer cannot recover it. Missed lexical variants, uncommon abbreviations, spelling variation, or unexpected phrasing therefore remain unrecoverable downstream.
+Missed lexical variants, uncommon abbreviations, spelling variation, or unexpected phrasing therefore remain unrecoverable downstream.
 
-The transformer validation layer also has limitations. It operates primarily on sentence-level context, but some clinical validity decisions require wider note-level, admission-level, or temporal context. For example, whether a condition is active, historical, resolving, or clinically relevant may depend on information outside the local sentence.
+The transformer validation layer also operates primarily on sentence-level context. Some clinical validity decisions require wider note-level, admission-level, or temporal context, especially when determining whether a condition is active, historical, resolving, or clinically relevant.
 
-The precision-oriented threshold reduced false positives but also reduced recall. Evaluation showed this trade-off was not uniform across entity types: transformer validation improved output quality for `INTERVENTION` and `CLINICAL_CONDITION`, but degraded `SYMPTOM` performance where rule-based extraction and negation handling were already relatively strong.
-
-This suggests that a single global validation threshold is too coarse. Entity-specific thresholds, bypass logic, or wider-context validation may be required for stronger performance.
+Finally, the precision-oriented threshold reduced false positives but also reduced recall. This trade-off was not uniform across entity types, showing that a single global threshold is too coarse for the final system.
 
 ##
 ## 17.4 Evaluation Limitations
@@ -4108,7 +4102,7 @@ Main deployment limitations:
 
 The system has also not undergone clinician review, prospective safety testing, workflow evaluation, regulatory assessment, or clinical impact analysis.
 
-The deployed API should therefore be interpreted as an inference-only deployment demonstration. It shows that the NLP pipeline can be packaged and served reproducibly, but it should not be used for automated diagnosis, treatment decisions, escalation decisions, or live clinical safety-netting.
+The deployed API should therefore be interpreted as an inference-only demonstration: it shows that the pipeline can be packaged and served reproducibly, but it is not suitable for clinical production use.
 
 ---
 
@@ -4185,15 +4179,6 @@ Future work should extend the inference-only deployment toward a more complete M
 
 These additions would improve maintainability, observability, and operational robustness while remaining separate from clinical deployment approval.
 
-##
-## 18.6 Clinical and Research Validation
-
-Before any clinical use, the pipeline would require independent clinician review, prospective validation, workflow testing, and governance assessment.
-
-The appropriate next clinical step is not automated decision support. It is clinician-reviewed validation of whether the structured outputs are accurate, useful, and safe enough for research, audit, cohorting, or downstream modelling.
-
-Overall, future work should preserve the works’s core design principle: controlled, auditable clinical NLP outputs first; broader integration and automation only after stronger validation.
-
 ---
 
 # 19. Potential Clinical and Research Integration
@@ -4243,6 +4228,7 @@ A realistic integration pathway would progress in stages:
    - Present extracted entities to clinicians for review.
    - Analyse false positives, false negatives, and entity-specific failure modes.
    - Refine thresholds and validation policies.
+   - Assess usability, review burden, and how clinicians would inspect uncertain or rejected entities.
 
 3. **Research workflow integration**
    - Use outputs in controlled research datasets, dashboards, or retrieval systems.
