@@ -1,4 +1,4 @@
-# Hybrid Clinical Notes Extraction Pipeline
+# Clinical Entity Extraction-Validation System
 
 ***Precision-First Clinical NLP System Using Rule-Based Entity Extraction with BioClinicalBERT Validation for Structuring ICU Reports***
 
@@ -4573,16 +4573,16 @@ If you use this repository or its models as part of your work, please cite the o
 AHA:
 
 ```markdown
-Yip, S. (2026). Hybrid Clinical Notes Extraction Pipeline (1.0.0). Zenodo. 
+Yip, S. (2026). Clinical Entity Extraction-Validation System (1.0.0). Zenodo. 
 https://doi.org/10.5281/zenodo.20018309
 ```
 
 BibTeX for LaTeX users:
 
 ```bibtex
-@software{yip-2026-nlp-extraction-pipeline,
+@software{yip-2026-nlp-extraction-validation-system,
   author = {Simon Yip},
-  title = {Hybrid Clinical Notes Extraction Pipeline},
+  title = {Clinical Entity Extraction-Validation System},
   url = {https://doi.org/10.5281/zenodo.20018309},
   year = {2026},
   publisher = {Zenodo}
